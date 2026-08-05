@@ -31,10 +31,8 @@ final class UsageStore: ObservableObject {
     @Published var sessionCost = 0.0
     @Published var dayCost = 0.0
     @Published var burnPerMin = 0.0        // tokens/min sur la dernière heure
-    // Courbe « heart monitor » : débit instantané (tokens/min) par tick de 15 s,
-    // fenêtre glissante ~12 min. Le 1er échantillon (full scan) est ignoré.
+    // Courbe « heart monitor » : un point par tick (1 Hz), fenêtre ~2 min.
     @Published var burnHistory: [Double] = []
-    private var lastBurnSample: (date: Date, tokens: Int)?
     @Published var depletesAt: Date?       // projection épuisement session
     @Published var livePercent: Double?    // % session estimé en temps réel entre deux appels API
     // Plafond RÉEL du forfait, estimé depuis le % officiel de l'API :
@@ -57,6 +55,7 @@ final class UsageStore: ObservableObject {
     private var samples: [(Date, Double)] = []
     private var isRefreshing = false
     private var didFullScan = false
+    private var lastJournal = Date.distantPast
 
     // Tout le travail scanner passe par ce guard : le scanner n'est PAS
     // thread-safe, il ne doit jamais tourner deux fois en parallèle.
@@ -102,10 +101,32 @@ final class UsageStore: ObservableObject {
         await Task.detached(priority: .utility) { scanner.refresh(maxAgeHours: 720) }.value
 
         publishLive(fetched, apiFresh: apiFresh)
-        aggregateJournal()
-        journalReady = true
+        // Journal + cache disque au plus une fois par minute : le coût/jour bouge
+        // lentement, et ça garde le tick live (1 Hz) sans agrégat ni écriture.
+        if Date().timeIntervalSince(lastJournal) > 60 {
+            lastJournal = Date()
+            aggregateJournal()
+            journalReady = true
+            await Task.detached(priority: .utility) { scanner.saveCache() }.value
+        }
         checkAlerts()
-        await Task.detached(priority: .utility) { scanner.saveCache() }.value
+    }
+
+    /**
+     * Tick live (1 Hz) : scan incrémental des seuls transcripts touchés récemment.
+     * Pas de réseau (l'endpoint OAuth rate-limite), pas de journal, pas d'écriture
+     * disque — ~10 ms hors main actor, c'est ce qui rend le monitor fluide.
+     */
+    func tick() async {
+        guard didFullScan, !isRefreshing else { return }
+        isRefreshing = true
+        refreshStartedAt = Date()
+        defer { isRefreshing = false; refreshStartedAt = nil }
+        let scanner = self.scanner
+        // 2 h : seul un fichier écrit récemment peut avoir de nouveaux octets.
+        await Task.detached(priority: .utility) { scanner.refresh(maxAgeHours: 2) }.value
+        publishLive(sub, apiFresh: false)
+        // pas de mlog ici : à 1 Hz ça noierait le journal de debug
     }
 
     private func publishLive(_ fetched: SubscriptionUsage?, apiFresh: Bool) {
@@ -157,15 +178,27 @@ final class UsageStore: ObservableObject {
         return "à \(f.string(from: r))"
     }
 
+    // Les tokens n'arrivent pas en continu : une réponse qui se termine écrit
+    // 50k d'un coup. Un débit calculé d'un tick à l'autre serait donc un peigne
+    // de pics et de zéros. On mesure sur une fenêtre glissante de 30 s du
+    // compteur cumulatif, ré-échantillonnée à chaque tick : lisse et exact.
+    private var burnSamples: [(date: Date, tokens: Int)] = []
+    private static let burnWindow: TimeInterval = 30
+    static let burnPoints = 120 // ~2 min à 1 Hz
+
     private func updateBurnHistory() {
-        let cum = scanner.cumulativeTokens
-        defer { lastBurnSample = (Date(), cum) }
-        guard let last = lastBurnSample else { return } // 1er passage = full scan, pas un débit
-        let dt = Date().timeIntervalSince(last.date)
-        guard dt > 5 else { return }
-        let rate = Double(cum - last.tokens) / dt * 60
-        burnHistory.append(max(0, rate))
-        if burnHistory.count > 48 { burnHistory.removeFirst(burnHistory.count - 48) }
+        let now = Date(), cum = scanner.cumulativeTokens
+        burnSamples.append((now, cum))
+        burnSamples.removeAll { $0.date < now.addingTimeInterval(-2 * Self.burnWindow) }
+        // référence = le plus récent échantillon assez vieux pour couvrir la fenêtre
+        guard let ref = burnSamples.last(where: { now.timeIntervalSince($0.date) >= Self.burnWindow })
+                ?? burnSamples.first else { return }
+        let dt = now.timeIntervalSince(ref.date)
+        guard dt > 0.5 else { return } // 1er échantillon : pas encore de débit
+        burnHistory.append(max(0, Double(cum - ref.tokens) / dt * 60))
+        if burnHistory.count > Self.burnPoints {
+            burnHistory.removeFirst(burnHistory.count - Self.burnPoints)
+        }
     }
 
     // % temps réel : base = dernier % API, interpolé entre deux appels avec les

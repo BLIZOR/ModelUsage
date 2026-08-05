@@ -26,23 +26,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hosting
 
         Task { await self.refresh(includeAPI: true) }
-        // scan local toutes les 15 s (menubar temps réel), API toutes les 60 s
+        // Tick 1 Hz : scan incrémental local (~10 ms) → monitor live fluide.
+        // Popover fermé : 1 tick sur 5 suffit pour le cadran menubar.
+        // API + journal strictement toutes les 60 s — l'endpoint rate-limite
+        // agressivement, un retry plus rapide entretient le blocage.
         var tick = 0
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             tick += 1
             guard let self else { return }
             let t = tick
             Task { @MainActor in
-                // API strictement toutes les 60 s — l'endpoint rate-limite
-                // agressivement, un retry plus rapide entretient le blocage
-                await self.refresh(includeAPI: t % 4 == 0)
+                if t % 60 == 0 {
+                    await self.refresh(includeAPI: true)
+                } else if self.popover.isShown || t % 5 == 0 {
+                    await self.store.tick()
+                    self.updateGauge()
+                }
             }
         }
+        // le timer doit continuer à tourner pendant qu'on interagit avec le popover
+        RunLoop.main.add(timer!, forMode: .common)
     }
+
+    private var gaugeShown: Int??
 
     @MainActor
     private func updateGauge() {
         let pct = store.livePercent ?? store.sub?.fiveHourPercent
+        let rounded = pct.map { Int($0) }
+        guard gaugeShown != rounded else { return } // pas de redraw pour rien
+        gaugeShown = rounded
         statusItem.button?.image = Self.gaugeIcon(pct: pct)
         statusItem.button?.title = ""
     }

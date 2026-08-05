@@ -44,6 +44,18 @@ final class TranscriptScanner: @unchecked Sendable {
     private static let cacheURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/ModelUsage/scan-cache.json")
 
+    // 🚨 Fuseau LOCAL obligatoire : les clés de dailyCosts sont des
+    // `Calendar.current.startOfDay` (minuit local). Un ISO8601DateFormatter
+    // relisait "2026-08-05" en minuit UTC → 2 h d'écart → au rechargement du
+    // cache chaque journée se dédoublait en deux buckets (deux barres pour le
+    // même jour, moyenne/j fausse).
+    private static let dayKeyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
     /** Charge le cache. `true` = historique restauré, seul le live 24 h est à reconstruire. */
     func loadCache() -> Bool {
         guard let data = try? Data(contentsOf: Self.cacheURL),
@@ -51,13 +63,13 @@ final class TranscriptScanner: @unchecked Sendable {
         offsets = c.offsets
         projectCosts = c.projectCosts
         modelCosts = c.modelCosts
-        let f = ISO8601DateFormatter(); f.formatOptions = [.withFullDate]
+        let f = Self.dayKeyFormatter
         for (k, v) in c.dailyCosts { if let d = f.date(from: k) { dailyCosts[d, default: 0] += v } }
         return true
     }
 
     func saveCache() {
-        let f = ISO8601DateFormatter(); f.formatOptions = [.withFullDate]
+        let f = Self.dayKeyFormatter
         // deux Date distinctes peuvent formater le même jour → fusion, jamais fatal
         let c = ScanCache(offsets: offsets,
                           dailyCosts: Dictionary(dailyCosts.map { (f.string(from: $0.key), $0.value) },
@@ -121,9 +133,13 @@ final class TranscriptScanner: @unchecked Sendable {
         modelCosts = modelCosts.filter { k, _ in months.contains(String(k.prefix(7))) }
     }
 
-    private func monthKey(_ d: Date) -> String {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM"; return f.string(from: d)
-    }
+    // appelé une fois par ligne scannée : instancier le formatter ici coûtait
+    // plus cher que le parsing JSON lui-même
+    private let monthFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM"; return f
+    }()
+
+    private func monthKey(_ d: Date) -> String { monthFormatter.string(from: d) }
 
     /** Nom de projet lisible depuis le dossier slug du transcript. */
     private func projectName(of url: URL) -> String {

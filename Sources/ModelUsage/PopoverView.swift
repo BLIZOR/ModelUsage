@@ -1,8 +1,9 @@
 import ServiceManagement
 import SwiftUI
 
-// Un seul écran, sans onglets ni effets de survol : session (forfait réel),
-// courbe live, par-modèle, burn/prévision, semaine, coûts équiv. API.
+// Un seul écran : session (forfait réel), courbe live, par-modèle, santé,
+// semaine, économie du mois. Le détail chiffré est en tooltip (.help) — l'écran
+// ne montre que ce qui se lit d'un coup d'œil.
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
 
@@ -12,8 +13,7 @@ struct PopoverView: View {
             sessionHero
             heartMonitor
             if !store.rows.isEmpty { modelSection }
-            predictionSection
-            weekSection
+            weeklySection
             Divider().overlay(Color.white.opacity(0.06))
             costSection
             footer
@@ -39,11 +39,7 @@ struct PopoverView: View {
                     .background(Capsule().fill(Theme.teal.opacity(0.14)))
             }
             Spacer()
-            if let reset = store.sub?.fiveHourResetsAt {
-                Text("reset \(countdown(to: reset))")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.sub)
-            } else {
+            if store.sub?.fiveHourResetsAt == nil {
                 // un seul état explicite plutôt que des « — » muets partout
                 Text("⏳ % officiels en attente")
                     .font(.system(size: 12))
@@ -57,16 +53,11 @@ struct PopoverView: View {
     private var sessionHero: some View {
         let pct = store.livePercent ?? store.sub?.fiveHourPercent
         let color = Theme.status(pct)
+        let fraction = (pct ?? 0) / 100
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(pct.map { "\(Int($0)) %" } ?? "—")
-                    .font(AppFont.black(42))
-                    .foregroundStyle(color)
-                Spacer()
-                Text("SESSION 5 H")
-                    .font(AppFont.bold(11)).tracking(1.2)
-                    .foregroundStyle(Theme.faint)
-            }
+            Text("SESSION 5 H")
+                .font(AppFont.bold(11)).tracking(1.2)
+                .foregroundStyle(Theme.faint)
             // Début · Durée · Reset — le bloc 5 h officiel (resets_at API)
             if let reset = store.sub?.fiveHourResetsAt {
                 let started = reset.addingTimeInterval(-5 * 3600)
@@ -80,51 +71,65 @@ struct PopoverView: View {
                 }
                 .padding(.vertical, 2)
             }
-            bar(fraction: (pct ?? 0) / 100, color: color, height: 14)
-            HStack {
-                if let limit = store.estimatedLimit {
-                    Text("\(tokensFmt(store.sessionTokens)) / ≈\(tokensFmt(limit)) tokens")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.sub)
-                } else {
-                    Text("\(tokensFmt(store.sessionTokens)) tokens consommés")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.sub)
-                }
-                Spacer()
-                if let rest = store.remainingTokens {
-                    Text("reste ≈\(tokensFmt(rest))")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(color)
-                }
+            // le % vit SUR la barre : un seul endroit où lire la conso
+            ZStack(alignment: .trailing) {
+                bar(fraction: fraction, color: color, height: 22)
+                Text(pct.map { "\(Int($0)) %" } ?? "—")
+                    .font(AppFont.black(14))
+                    // au-delà de ~92 % le remplissage passe sous le texte
+                    .foregroundStyle(fraction > 0.92 ? Theme.bg : color)
+                    .padding(.trailing, 10)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.5), value: pct.map { Int($0) })
             }
+            .help(sessionDetail)
+            // seul reste de l'ancienne section « santé » : le verdict du bloc 5 h
+            Text(sessionVerdict.0)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(sessionVerdict.1)
         }
+    }
+
+    private var sessionVerdict: (String, Color) {
+        guard let depletes = store.depletesAt else {
+            return (store.burnHistory.last ?? 0) < 1000
+                ? ("à l'arrêt", Theme.sub) : ("mesure en cours…", Theme.faint)
+        }
+        if let reset = store.sub?.fiveHourResetsAt, depletes >= reset {
+            return ("tiendra jusqu'au reset", Theme.teal)
+        }
+        let lasts = max(0, Int(depletes.timeIntervalSinceNow))
+        return ("épuisée dans \(lasts / 3600) h \(String(format: "%02d", (lasts % 3600) / 60)) — avant le reset",
+                Theme.amber)
+    }
+
+    private var sessionDetail: String {
+        var s = "\(tokensFmt(store.sessionTokens)) tokens"
+        if let limit = store.estimatedLimit { s += " / ≈\(tokensFmt(limit))" }
+        if let rest = store.remainingTokens { s += " · reste ≈\(tokensFmt(rest))" }
+        return s + "\néquiv. API : \(currency(store.sessionCost)) ce bloc · \(currency(store.dayCost)) aujourd'hui"
     }
 
     // MARK: - courbe live + allure (fusionnés : une seule lecture du débit)
 
     private var heartMonitor: some View {
         let live = store.burnHistory.last ?? store.burnPerMin
-        let (emoji, label) = pace(live)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text("TOKENS LIVE")
                     .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
                 Spacer()
-                Text(emoji).font(.system(size: 16))
+                Text(pace(live)).font(.system(size: 16))
                 Text("\(tokensFmt(Int(live))) tok/min")
                     .font(AppFont.bold(13))
                     .foregroundStyle(Theme.teal)
-                Text("· \(label)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.sub)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.4), value: live)
             }
             HeartRateView(values: store.burnHistory)
                 .frame(height: 52)
-            Text("moyenne 1 h : \(tokensFmt(Int(store.burnPerMin))) tok/min · \(tokensFmt(Int(store.burnPerMin * 60))) tok/h")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.faint)
+                .help("moyenne 1 h : \(tokensFmt(Int(store.burnPerMin))) tok/min · \(tokensFmt(Int(store.burnPerMin * 60))) tok/h")
         }
     }
 
@@ -132,119 +137,154 @@ struct PopoverView: View {
 
     private var modelSection: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text("PAR MODÈLE — BLOC COURANT")
+            Text("PAR MODÈLE")
                 .font(AppFont.bold(11)).tracking(1.2)
                 .foregroundStyle(Theme.faint)
-            ForEach(store.rows) { row in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Circle().fill(row.color).frame(width: 8, height: 8)
-                        Text(row.label)
-                            .font(AppFont.bold(15))
-                            .foregroundStyle(Theme.text)
-                        Spacer()
-                        Text("\(tokensFmt(row.tokens)) tok")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.sub)
-                        Text(currency(row.cost))
-                            .font(AppFont.bold(14))
-                            .foregroundStyle(Theme.text)
-                    }
-                    bar(fraction: row.share, color: row.color, height: 12)
-                }
+            HStack(spacing: 10) {
+                ForEach(modelPills) { modelPill($0) }
             }
         }
     }
 
-    // MARK: - prévision (Tokens restants · Tiendra · badge)
+    // Toujours les mêmes 3 carrés — les modèles que Claude Code pilote — même à
+    // 0 %, pour que la lecture ne bouge pas d'un bloc à l'autre. Tout autre
+    // modèle qui aurait consommé s'ajoute à la suite.
+    private static let pinnedModels = ["Opus 5", "Fable 5", "Haiku"]
 
-    private var predictionSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("PRÉVISION")
-                .font(AppFont.bold(11)).tracking(1.2)
-                .foregroundStyle(Theme.faint)
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("TOKENS RESTANTS")
-                        .font(AppFont.bold(10)).tracking(1.0)
-                        .foregroundStyle(Theme.faint)
-                    Text(store.remainingTokens.map { "≈\(tokensFmt($0))" } ?? "—")
-                        .font(AppFont.black(20))
-                        .foregroundStyle(Theme.text)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("TIENDRA")
-                        .font(AppFont.bold(10)).tracking(1.0)
-                        .foregroundStyle(Theme.faint)
-                    if let depletes = store.depletesAt {
-                        let lasts = max(0, Int(depletes.timeIntervalSinceNow))
-                        Text("\(lasts / 3600) h \(String(format: "%02d", (lasts % 3600) / 60))")
-                            .font(AppFont.black(20))
-                            .foregroundStyle(Theme.text)
-                    } else {
-                        Text("—").font(AppFont.black(20)).foregroundStyle(Theme.faint)
-                    }
-                }
-            }
-            if let depletes = store.depletesAt {
-                if let reset = store.sub?.fiveHourResetsAt, depletes >= reset {
-                    Label("Les tokens tiendront jusqu'au reset", systemImage: "checkmark.circle.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.green)
-                } else {
-                    Label("Épuisés vers \(hourFmt(depletes)) — avant le reset", systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.amber)
-                }
-            } else if (store.burnHistory.last ?? 0) < 1000 {
-                // rien ne brûle : pas une mesure en cours, un vrai repos
-                Label("À l'arrêt — aucun épuisement en vue", systemImage: "moon.zzz.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.sub)
-            } else {
-                Text("mesure en cours…")
-                    .font(.system(size: 12)).foregroundStyle(Theme.faint)
-            }
+    private var modelPills: [ModelRow] {
+        let byLabel = Dictionary(store.rows.map { ($0.label, $0) }, uniquingKeysWith: { a, _ in a })
+        let pinned = Self.pinnedModels.map { label in
+            byLabel[label] ?? ModelRow(id: label, label: label,
+                                       color: Pricing.table.first { $0.label == label }?.color ?? .gray,
+                                       tokens: 0, inTok: 0, outTok: 0, cacheTok: 0, cost: 0, share: 0)
         }
+        return pinned + store.rows.filter { !Self.pinnedModels.contains($0.label) }
     }
 
-    // MARK: - semaine
+    // Pill carrée : remplissage de bas en haut = part du bloc courant.
+    private func modelPill(_ row: ModelRow) -> some View {
+        ZStack(alignment: .top) {
+            GeometryReader { geo in
+                Rectangle()
+                    .fill(row.color.opacity(0.85))
+                    .frame(height: geo.size.height * min(1, row.share))
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .animation(.easeOut(duration: 0.6), value: row.share)
+            }
+            VStack(spacing: 2) {
+                Text(row.label)
+                    .font(AppFont.bold(12))
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                Text("\(Int(row.share * 100)) %")
+                    .font(AppFont.black(20))
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.6), value: Int(row.share * 100))
+            }
+            // texte en haut : lisible sur le fond sombre comme sur le remplissage
+            .foregroundStyle(Theme.text)
+            .padding(.top, 10)
+            .padding(.horizontal, 6)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .background(Theme.track)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .help("\(currency(row.cost)) · \(tokensFmt(row.tokens)) tokens — in \(tokensFmt(row.inTok)) · out \(tokensFmt(row.outTok)) · cache \(tokensFmt(row.cacheTok))")
+    }
 
-    private var weekSection: some View {
+    // MARK: - conso hebdo (jauge d'ALLURE, pas de niveau)
+
+    /**
+     * La couleur ne dit pas « combien reste-t-il » mais « suis-je en avance sur
+     * mon budget ». 60 % consommés à mi-semaine = normal (vert) ; les mêmes 60 %
+     * avec encore 4 jours avant le reset = rouge. Repère = part de la fenêtre
+     * 7 j écoulée, la barre devrait rester à sa hauteur.
+     */
+    private var weeklySection: some View {
         let pct = store.sub?.sevenDayPercent
+        let elapsed = weekElapsedFraction
+        let color = weeklyColor(pct: pct, elapsed: elapsed)
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("SEMAINE")
+                Text("CONSO. HEBDO.")
                     .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
                 Spacer()
-                if let reset = store.sub?.sevenDayResetsAt {
-                    Text("reset \(dayFmt(reset))")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.faint)
-                }
                 Text(pct.map { "\(Int($0)) %" } ?? "—")
                     .font(AppFont.bold(15))
-                    .foregroundStyle(Theme.status(pct))
+                    .foregroundStyle(color)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.5), value: pct.map { Int($0) })
             }
-            bar(fraction: (pct ?? 0) / 100, color: Theme.status(pct), height: 10)
-            // à ce rythme : quand le plafond hebdo tombe (pente sur ≥ 4 h)
-            if let cap = store.weekDepletesAt {
-                let hitsBeforeReset = (store.sub?.sevenDayResetsAt).map { cap < $0 } ?? false
-                Text("à ce rythme : plafond \(weekDayFmt(cap))")
-                    .font(.system(size: 11.5, weight: hitsBeforeReset ? .semibold : .regular))
-                    .foregroundStyle(hitsBeforeReset ? Theme.amber : Theme.faint)
-            }
+            bar(fraction: (pct ?? 0) / 100, color: color, height: 14)
+                .overlay(alignment: .leading) {
+                    if let e = elapsed {
+                        GeometryReader { geo in
+                            Rectangle()
+                                .fill(Color.white.opacity(0.55))
+                                .frame(width: 2)
+                                .offset(x: geo.size.width * e)
+                        }
+                    }
+                }
+                .help(weeklyDetail)
+            Text(weeklyVerdict)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(color)
         }
     }
 
-    // MARK: - coûts (ex-Journal, condensé)
+    /// Part de la fenêtre 7 j déjà écoulée (0…1). nil tant que l'API n'a rien dit.
+    private var weekElapsedFraction: Double? {
+        guard let reset = store.sub?.sevenDayResetsAt else { return nil }
+        return min(1, max(0, 1 - reset.timeIntervalSinceNow / (7 * 24 * 3600)))
+    }
+
+    private func weeklyColor(pct: Double?, elapsed: Double?) -> Color {
+        guard let pct else { return Theme.sub }
+        if pct >= 95 { return Theme.red }
+        // début de fenêtre : le ratio explose sur du bruit, on ne juge pas encore
+        guard let elapsed, elapsed > 0.03 else { return Theme.teal }
+        switch pct / 100 / elapsed { // 1 = pile dans le budget
+        case ..<1.05: return Theme.teal
+        case ..<1.35: return Theme.amber
+        default: return Theme.red
+        }
+    }
+
+    private var weeklyVerdict: String {
+        guard let pct = store.sub?.sevenDayPercent, let reset = store.sub?.sevenDayResetsAt else {
+            return "en attente des % officiels"
+        }
+        let left = remainingLabel(until: reset)
+        if pct >= 95 { return "plafond hebdo atteint — reset dans \(left)" }
+        guard let elapsed = weekElapsedFraction, elapsed > 0.03 else { return "reset dans \(left)" }
+        if pct / 100 / elapsed < 1.05 { return "dans le budget — reste \(left) avant reset" }
+        if let cap = store.weekDepletesAt, cap < reset {
+            return "trop vite : plafond \(weekDayFmt(cap)), reset dans \(left)"
+        }
+        return "\(Int(pct)) % brûlés en \(Int(elapsed * 100)) % de la semaine — reste \(left)"
+    }
+
+    private var weeklyDetail: String {
+        var s = "repère blanc = part de la fenêtre 7 j écoulée"
+        if let e = weekElapsedFraction { s += " (\(Int(e * 100)) %)" }
+        if let reset = store.sub?.sevenDayResetsAt { s += "\nreset \(dayFmt(reset))" }
+        if let cap = store.weekDepletesAt { s += "\nà ce rythme : plafond \(weekDayFmt(cap))" }
+        return s
+    }
+
+    private func remainingLabel(until d: Date) -> String {
+        let s = max(0, Int(d.timeIntervalSinceNow))
+        let days = s / 86400, hours = (s % 86400) / 3600
+        return days > 0 ? "\(days) j \(hours) h" : "\(hours) h"
+    }
+
+    // MARK: - économie du mois (ex-Journal, condensé)
 
     private var costSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("ÉQUIV. API — \(monthName().uppercased())")
+                Text("ÉCONOMIE \(monthName().uppercased())")
                     .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
                 Spacer()
@@ -258,14 +298,7 @@ struct PopoverView: View {
                 }
             }
             if store.journalReady {
-                dailyChart
-                HStack {
-                    fact("30 JOURS", currency(store.days.reduce(0) { $0 + $1.cost }))
-                    Spacer()
-                    fact("MOYENNE / J", currency(store.days.isEmpty ? 0 : store.days.reduce(0) { $0 + $1.cost } / Double(store.days.count)))
-                    Spacer()
-                    fact("FIN DE MOIS ≈", currency(store.monthProjection))
-                }
+                dailyChart.help(costDetail)
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -273,15 +306,21 @@ struct PopoverView: View {
                         .font(.system(size: 12)).foregroundStyle(Theme.sub)
                 }
             }
-            if !store.monthTopProjects.isEmpty {
-                Text("Projets : " + store.monthTopProjects.map { "\($0.0) \(currency($0.1))" }.joined(separator: " · "))
-                    .font(.system(size: 11)).foregroundStyle(Theme.faint).lineLimit(1)
-            }
-            if !store.monthTopModels.isEmpty {
-                Text("Modèles : " + store.monthTopModels.map { "\($0.0) \(currency($0.1))" }.joined(separator: " · "))
-                    .font(.system(size: 11)).foregroundStyle(Theme.faint).lineLimit(1)
-            }
         }
+    }
+
+    private var costDetail: String {
+        let total = store.days.reduce(0) { $0 + $1.cost }
+        let avg = store.days.isEmpty ? 0 : total / Double(store.days.count)
+        var s = "30 j : \(currency(total)) · moyenne \(currency(avg))/j"
+        s += "\nfin de mois ≈ \(currency(store.monthProjection)) — abonnement \(currency(UsageStore.subscriptionMonthly))"
+        if !store.monthTopProjects.isEmpty {
+            s += "\nprojets : " + store.monthTopProjects.map { "\($0.0) \(currency($0.1))" }.joined(separator: " · ")
+        }
+        if !store.monthTopModels.isEmpty {
+            s += "\nmodèles : " + store.monthTopModels.map { "\($0.0) \(currency($0.1))" }.joined(separator: " · ")
+        }
+        return s
     }
 
     private var dailyChart: some View {
@@ -308,13 +347,13 @@ struct PopoverView: View {
 
     // Allure de conso live : du piéton à la fusée (seuils calés sur les débits
     // réels observés, cache reads compris).
-    private func pace(_ tokPerMin: Double) -> (String, String) {
+    private func pace(_ tokPerMin: Double) -> String {
         switch tokPerMin {
-        case ..<10_000: return ("🚶", "Tranquille")
-        case ..<150_000: return ("🚴", "Actif")
-        case ..<600_000: return ("🚗", "Rapide")
-        case ..<1_500_000: return ("✈️", "Très rapide")
-        default: return ("🚀", "Extrême")
+        case ..<10_000: return "🚶"
+        case ..<150_000: return "🚴"
+        case ..<600_000: return "🚗"
+        case ..<1_500_000: return "✈️"
+        default: return "🚀"
         }
     }
 
@@ -329,24 +368,10 @@ struct PopoverView: View {
         }
     }
 
-    private func fact(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(AppFont.bold(10)).tracking(1.0)
-                .foregroundStyle(Theme.faint)
-            Text(value)
-                .font(AppFont.bold(15))
-                .foregroundStyle(Theme.text)
-        }
-    }
-
     // MARK: - footer
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Text("session \(currency(store.sessionCost)) · jour \(currency(store.dayCost))")
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.faint)
             Spacer()
             LaunchAtLoginToggle()
             Button("Quitter") { NSApp.terminate(nil) }
@@ -365,7 +390,10 @@ struct PopoverView: View {
                 Capsule().fill(Theme.track)
                 Capsule()
                     .fill(color)
-                    .frame(width: max(height, geo.size.width * min(1, fraction)))
+                    // le minimum ne s'applique qu'à partir de 1 % : sinon une
+                    // barre vide affiche un gros point (capsule de largeur = hauteur)
+                    .frame(width: fraction <= 0 ? 0 : max(height, geo.size.width * min(1, fraction)))
+                    .animation(.easeOut(duration: 0.5), value: fraction)
             }
         }
         .frame(height: height)
@@ -383,33 +411,27 @@ struct PopoverView: View {
         }
     }
 
-    private func countdown(to date: Date) -> String {
-        let s = max(0, Int(date.timeIntervalSinceNow))
-        return "\(s / 3600)h \((s % 3600) / 60)m"
+    // Formatters mis en cache : le body est recalculé à chaque tick (1 Hz),
+    // instancier un DateFormatter à chaque passage coûte plus que tout le reste.
+    private static func fmt(_ pattern: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "fr_FR")
+        f.dateFormat = pattern
+        return f
     }
+    private static let hourF = fmt("HH:mm")
+    private static let dayF = fmt("EEE HH:mm")
+    private static let weekDayF = fmt("EEEE HH'h'")
+    private static let monthF = fmt("MMMM yyyy")
 
-    private func hourFmt(_ d: Date) -> String {
-        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
-    }
-
-    private func dayFmt(_ d: Date) -> String {
-        let f = DateFormatter(); f.locale = Locale(identifier: "fr_FR")
-        f.dateFormat = "EEE HH:mm"; return f.string(from: d)
-    }
-
-    private func weekDayFmt(_ d: Date) -> String {
-        let f = DateFormatter(); f.locale = Locale(identifier: "fr_FR")
-        f.dateFormat = "EEEE HH'h'"; return f.string(from: d)
-    }
-
-    private func monthName() -> String {
-        let f = DateFormatter(); f.locale = Locale(identifier: "fr_FR")
-        f.dateFormat = "MMMM"; return f.string(from: Date())
-    }
+    private func hourFmt(_ d: Date) -> String { Self.hourF.string(from: d) }
+    private func dayFmt(_ d: Date) -> String { Self.dayF.string(from: d) }
+    private func weekDayFmt(_ d: Date) -> String { Self.weekDayF.string(from: d) }
+    private func monthName() -> String { Self.monthF.string(from: Date()) }
 }
 
 // Tracé façon moniteur cardiaque : ligne teal avec léger glow, grille faible,
-// point pulsant au bout. Un point toutes les 15 s, fenêtre ~12 min.
+// point pulsant au bout. Un point par seconde, fenêtre ~2 min.
 struct HeartRateView: View {
     let values: [Double]
     @State private var pulse = false
@@ -417,7 +439,7 @@ struct HeartRateView: View {
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width, h = geo.size.height
-            let slots = 48
+            let slots = UsageStore.burnPoints
             let maxV = max(values.max() ?? 1, 1)
             let points: [CGPoint] = values.enumerated().map { i, v in
                 CGPoint(x: w * CGFloat(slots - values.count + i) / CGFloat(slots - 1),

@@ -11,7 +11,6 @@ mkdir -p "$APP/Contents/MacOS"
 
 cp .build/release/ModelUsage "$APP/Contents/MacOS/ModelUsage"
 mkdir -p "$APP/Contents/Resources"
-cp Fonts/NetwaNeo-*.ttf "$APP/Contents/Resources/" 2>/dev/null || true  # polices optionnelles (non redistribuées)
 cp Assets/AppIcon.icns "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'

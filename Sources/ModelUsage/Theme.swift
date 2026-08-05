@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-// Identité Netwa : ink teinté teal, accent #00D4AA, Netwa Neo (PS: SwileNova).
+// Identité : ink teinté teal, accent #00D4AA, police système Apple (SF).
 enum Theme {
     static let bg = Color(red: 0.047, green: 0.078, blue: 0.071)      // ink teal-tinté
     static let raised = Color.white.opacity(0.045)
@@ -21,25 +21,13 @@ enum Theme {
     }
 }
 
-enum NetwaFont {
-    static private(set) var available = false
-
-    static func register() {
-        guard let dir = Bundle.main.resourceURL else { return }
-        for name in ["NetwaNeo-Bold", "NetwaNeo-Black"] {
-            let url = dir.appendingPathComponent("\(name).ttf")
-            if FileManager.default.fileExists(atPath: url.path) {
-                CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
-                available = true
-            }
-        }
-    }
-
-    // Netwa Neo n'a que Bold et Black
+enum AppFont {
+    /// SF Pro semibold — labels et titres.
     static func bold(_ size: CGFloat) -> Font {
-        available ? .custom("SwileNova-Bold", size: size) : .system(size: size, weight: .semibold)
+        .system(size: size, weight: .semibold)
     }
+    /// SF Pro Rounded black — gros chiffres (rendu « compteur »).
     static func black(_ size: CGFloat) -> Font {
-        available ? .custom("SwileNova-Black", size: size) : .system(size: size, weight: .black)
+        .system(size: size, weight: .black, design: .rounded)
     }
 }

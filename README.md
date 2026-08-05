@@ -2,7 +2,7 @@
 
 Menubar macOS pour suivre la consommation **Claude Code** de ton abonnement (Pro/Max) en temps réel — par modèle, avec les **vrais plafonds du forfait**, le coût équivalent API et des projections.
 
-Natif Swift/SwiftUI, zéro dépendance, zéro Electron. Toutes les données restent sur ta machine.
+Natif Swift/SwiftUI (police système SF), zéro dépendance, zéro Electron. Toutes les données restent sur ta machine.
 
 ## Ce que ça affiche
 
@@ -33,7 +33,6 @@ Prérequis : macOS 14+, Xcode Command Line Tools, Claude Code connecté (le toke
 
 ## Notes
 
-- **Polices** : l'UI utilise Netwa Neo si présente dans `Fonts/` (non incluse — police commerciale), sinon la police système. Rien à faire.
 - L'endpoint usage **rate-limite vite** : l'app appelle strictement 1×/min et garde la dernière valeur en cas d'échec.
 - Cache local : `~/Library/Application Support/ModelUsage/scan-cache.json`. Log de debug : `/tmp/modelusage.log`.
 - `Attic/` : fonctionnalités en pause (panneau sessions/workflows, île notch, reprises, sessions programmées), non compilées.

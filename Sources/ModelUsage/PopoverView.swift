@@ -29,11 +29,11 @@ struct PopoverView: View {
     private var header: some View {
         HStack(spacing: 10) {
             Text("ModelUsage")
-                .font(NetwaFont.black(19))
+                .font(AppFont.black(19))
                 .foregroundStyle(Theme.text)
             if store.sub?.subscriptionType != nil {
                 Text(UsageStore.subscriptionLabel)
-                    .font(NetwaFont.bold(11))
+                    .font(AppFont.bold(11))
                     .foregroundStyle(Theme.teal)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Theme.teal.opacity(0.14)))
@@ -60,11 +60,11 @@ struct PopoverView: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text(pct.map { "\(Int($0)) %" } ?? "—")
-                    .font(NetwaFont.black(42))
+                    .font(AppFont.black(42))
                     .foregroundStyle(color)
                 Spacer()
                 Text("SESSION 5 H")
-                    .font(NetwaFont.bold(11)).tracking(1.2)
+                    .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
             }
             // Début · Durée · Reset — le bloc 5 h officiel (resets_at API)
@@ -109,12 +109,12 @@ struct PopoverView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text("TOKENS LIVE")
-                    .font(NetwaFont.bold(11)).tracking(1.2)
+                    .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
                 Spacer()
                 Text(emoji).font(.system(size: 16))
                 Text("\(tokensFmt(Int(live))) tok/min")
-                    .font(NetwaFont.bold(13))
+                    .font(AppFont.bold(13))
                     .foregroundStyle(Theme.teal)
                 Text("· \(label)")
                     .font(.system(size: 12))
@@ -133,21 +133,21 @@ struct PopoverView: View {
     private var modelSection: some View {
         VStack(alignment: .leading, spacing: 11) {
             Text("PAR MODÈLE — BLOC COURANT")
-                .font(NetwaFont.bold(11)).tracking(1.2)
+                .font(AppFont.bold(11)).tracking(1.2)
                 .foregroundStyle(Theme.faint)
             ForEach(store.rows) { row in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Circle().fill(row.color).frame(width: 8, height: 8)
                         Text(row.label)
-                            .font(NetwaFont.bold(15))
+                            .font(AppFont.bold(15))
                             .foregroundStyle(Theme.text)
                         Spacer()
                         Text("\(tokensFmt(row.tokens)) tok")
                             .font(.system(size: 13))
                             .foregroundStyle(Theme.sub)
                         Text(currency(row.cost))
-                            .font(NetwaFont.bold(14))
+                            .font(AppFont.bold(14))
                             .foregroundStyle(Theme.text)
                     }
                     bar(fraction: row.share, color: row.color, height: 12)
@@ -161,29 +161,29 @@ struct PopoverView: View {
     private var predictionSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("PRÉVISION")
-                .font(NetwaFont.bold(11)).tracking(1.2)
+                .font(AppFont.bold(11)).tracking(1.2)
                 .foregroundStyle(Theme.faint)
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("TOKENS RESTANTS")
-                        .font(NetwaFont.bold(10)).tracking(1.0)
+                        .font(AppFont.bold(10)).tracking(1.0)
                         .foregroundStyle(Theme.faint)
                     Text(store.remainingTokens.map { "≈\(tokensFmt($0))" } ?? "—")
-                        .font(NetwaFont.black(20))
+                        .font(AppFont.black(20))
                         .foregroundStyle(Theme.text)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("TIENDRA")
-                        .font(NetwaFont.bold(10)).tracking(1.0)
+                        .font(AppFont.bold(10)).tracking(1.0)
                         .foregroundStyle(Theme.faint)
                     if let depletes = store.depletesAt {
                         let lasts = max(0, Int(depletes.timeIntervalSinceNow))
                         Text("\(lasts / 3600) h \(String(format: "%02d", (lasts % 3600) / 60))")
-                            .font(NetwaFont.black(20))
+                            .font(AppFont.black(20))
                             .foregroundStyle(Theme.text)
                     } else {
-                        Text("—").font(NetwaFont.black(20)).foregroundStyle(Theme.faint)
+                        Text("—").font(AppFont.black(20)).foregroundStyle(Theme.faint)
                     }
                 }
             }
@@ -216,7 +216,7 @@ struct PopoverView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("SEMAINE")
-                    .font(NetwaFont.bold(11)).tracking(1.2)
+                    .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
                 Spacer()
                 if let reset = store.sub?.sevenDayResetsAt {
@@ -225,7 +225,7 @@ struct PopoverView: View {
                         .foregroundStyle(Theme.faint)
                 }
                 Text(pct.map { "\(Int($0)) %" } ?? "—")
-                    .font(NetwaFont.bold(15))
+                    .font(AppFont.bold(15))
                     .foregroundStyle(Theme.status(pct))
             }
             bar(fraction: (pct ?? 0) / 100, color: Theme.status(pct), height: 10)
@@ -245,15 +245,15 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("ÉQUIV. API — \(monthName().uppercased())")
-                    .font(NetwaFont.bold(11)).tracking(1.2)
+                    .font(AppFont.bold(11)).tracking(1.2)
                     .foregroundStyle(Theme.faint)
                 Spacer()
                 if store.journalReady {
                     Text(currency(store.monthCost))
-                        .font(NetwaFont.black(22))
+                        .font(AppFont.black(22))
                         .foregroundStyle(Theme.teal)
                     Text("×\(String(format: "%.1f", store.monthCost / UsageStore.subscriptionMonthly)) l'abonnement")
-                        .font(NetwaFont.bold(12))
+                        .font(AppFont.bold(12))
                         .foregroundStyle(Theme.text)
                 }
             }
@@ -321,7 +321,7 @@ struct PopoverView: View {
     private func sessionFact(_ label: String, _ value: String, _ align: HorizontalAlignment) -> some View {
         VStack(alignment: align, spacing: 2) {
             Text(label)
-                .font(NetwaFont.bold(10)).tracking(1.0)
+                .font(AppFont.bold(10)).tracking(1.0)
                 .foregroundStyle(Theme.faint)
             Text(value)
                 .font(.system(size: 15, weight: .bold, design: .monospaced))
@@ -332,10 +332,10 @@ struct PopoverView: View {
     private func fact(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(NetwaFont.bold(10)).tracking(1.0)
+                .font(AppFont.bold(10)).tracking(1.0)
                 .foregroundStyle(Theme.faint)
             Text(value)
-                .font(NetwaFont.bold(15))
+                .font(AppFont.bold(15))
                 .foregroundStyle(Theme.text)
         }
     }

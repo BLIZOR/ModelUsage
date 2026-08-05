@@ -1,10 +1,7 @@
-// Génère Assets/icon_1024.png — icône ModelUsage (identité Netwa :
-// ink teinté teal, anneau de jauge teal, % en Netwa Neo Black).
+// Génère Assets/icon_1024.png — ink teinté teal, anneau de jauge, % en SF Black.
 import AppKit
 import CoreText
 
-let fontURL = URL(fileURLWithPath: "Fonts/NetwaNeo-Black.ttf")
-CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
 
 let size: CGFloat = 1024
 let image = NSImage(size: NSSize(width: size, height: size))
@@ -35,8 +32,8 @@ arc.lineCapStyle = .round
 teal.setStroke()
 arc.stroke()
 
-// % en Netwa Neo Black au centre
-let font = NSFont(name: "SwileNova-Black", size: 330) ?? NSFont.systemFont(ofSize: 330, weight: .black)
+// % en SF Black au centre
+let font = NSFont.systemFont(ofSize: 330, weight: .black)
 let str = NSAttributedString(string: "%", attributes: [
     .font: font,
     .foregroundColor: NSColor(red: 0.95, green: 0.97, blue: 0.96, alpha: 1),

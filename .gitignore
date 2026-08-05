@@ -1,0 +1,8 @@
+.build/
+.DS_Store
+*.log
+# Police Netwa Neo (Swile Nova) : commerciale, non redistribuable.
+# L'app retombe proprement sur la police système si absente.
+Fonts/
+# dérivé de Assets/icon_1024.png par make-app.sh
+Assets/AppIcon.iconset/

@@ -1,11 +1,20 @@
 import AppKit
 import SwiftUI
 
+// Fenêtre borderless : le fond translucide + corner radius vivent dans la vue
+// SwiftUI, le panel lui-même est transparent.
+final class FloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var panel: FloatingPanel!
+    private var clickMonitor: Any?
+    private var sizeObs: NSKeyValueObservation?
     private let store = UsageStore()
+    private let scheduler = Scheduler()
     private var timer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -14,17 +23,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let axOpts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         mlog("launch — AX trusted: \(AXIsProcessTrustedWithOptions(axOpts))")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = Self.gaugeIcon(pct: nil)
+        statusItem.button?.image = Self.burnIcon(emoji: "🚶", pct: nil)
         statusItem.button?.action = #selector(togglePopover)
         statusItem.button?.target = self
 
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.appearance = NSAppearance(named: .darkAqua)
         let hosting = NSHostingController(rootView: PopoverView(store: store))
         hosting.sizingOptions = .preferredContentSize
-        popover.contentViewController = hosting
+        panel = FloatingPanel(contentRect: .zero,
+                              styleMask: [.borderless, .nonactivatingPanel],
+                              backing: .buffered, defer: false)
+        panel.contentViewController = hosting
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .popUpMenu
+        panel.hidesOnDeactivate = false // défaut NSPanel = true → fenêtre invisible (app .accessory jamais active)
+        // .fullScreenAuxiliary : sans lui le panel ne peut pas rejoindre un
+        // Space fullscreen (Ghostty plein écran) → isVisible mais jamais affiché
+        panel.collectionBehavior = [.moveToActiveSpace, .transient, .fullScreenAuxiliary]
+        panel.isMovableByWindowBackground = true
+        panel.appearance = NSAppearance(named: .darkAqua)
+        // les replis (« par modèle », chart) changent la hauteur du contenu :
+        // suivre preferredContentSize et redimensionner ancré en haut
+        sizeObs = hosting.observe(\.preferredContentSize) { [weak self] vc, _ in
+            let size = vc.preferredContentSize
+            Task { @MainActor in self?.resizePanel(to: size) }
+        }
 
+        scheduler.start()
         Task { await self.refresh(includeAPI: true) }
         // Tick 1 Hz : scan incrémental local (~10 ms) → monitor live fluide.
         // Popover fermé : 1 tick sur 5 suffit pour le cadran menubar.
@@ -38,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 if t % 60 == 0 {
                     await self.refresh(includeAPI: true)
-                } else if self.popover.isShown || t % 5 == 0 {
+                } else if self.panel.isVisible || t % 5 == 0 {
                     await self.store.tick()
                     self.updateGauge()
                 }
@@ -48,15 +74,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(timer!, forMode: .common)
     }
 
-    private var gaugeShown: Int??
+    private var gaugeShown: String?
 
     @MainActor
     private func updateGauge() {
-        let pct = store.livePercent ?? store.sub?.fiveHourPercent
-        let rounded = pct.map { Int($0) }
-        guard gaugeShown != rounded else { return } // pas de redraw pour rien
-        gaugeShown = rounded
-        statusItem.button?.image = Self.gaugeIcon(pct: pct)
+        let emoji = Theme.paceEmoji(store.hourIOTokens / 60)
+        let pct = (store.livePercent ?? store.sub?.fiveHourPercent).map { Int($0) }
+        let key = "\(emoji)|\(pct.map(String.init) ?? "—")"
+        guard gaugeShown != key else { return } // pas de redraw pour rien
+        gaugeShown = key
+        statusItem.button?.image = Self.burnIcon(emoji: emoji, pct: pct)
         statusItem.button?.title = ""
     }
 
@@ -66,43 +93,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateGauge()
     }
 
-    // Mini-logo de menubar : anneau de progression avec le % à l'intérieur.
-    private static func gaugeIcon(pct: Double?) -> NSImage {
-        let teal = NSColor(red: 0, green: 0.831, blue: 0.667, alpha: 1)
-        let color: NSColor = pct.map {
-            $0 >= 90 ? .systemRed : $0 >= 75 ? .systemOrange : teal
-        } ?? .tertiaryLabelColor
-        let side: CGFloat = 20
-        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-            let center = NSPoint(x: side / 2, y: side / 2)
-            let radius: CGFloat = 8.4
-
-            let track = NSBezierPath()
-            track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
-            track.lineWidth = 1.8
-            NSColor.labelColor.withAlphaComponent(0.25).setStroke()
-            track.stroke()
-
-            if let p = pct, p > 0 {
-                let arc = NSBezierPath()
-                arc.appendArc(withCenter: center, radius: radius,
-                              startAngle: 90, endAngle: 90 - 360 * min(p, 100) / 100,
-                              clockwise: true)
-                arc.lineWidth = 1.8
-                arc.lineCapStyle = .round
-                color.setStroke()
-                arc.stroke()
-            }
-
-            let text = pct.map { "\(Int($0))" } ?? "–"
-            let fontSize: CGFloat = text.count >= 3 ? 6.5 : 8.5
-            let str = NSAttributedString(string: text, attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .bold),
-                .foregroundColor: NSColor.labelColor,
-            ])
-            let s = str.size()
-            str.draw(at: NSPoint(x: center.x - s.width / 2, y: center.y - s.height / 2 - 0.5))
-
+    // Icône menubar : emoji d'allure + % de la session en cours (blanc).
+    private static func burnIcon(emoji: String, pct: Int?) -> NSImage {
+        let h: CGFloat = 20
+        let emojiW: CGFloat = 18, gap: CGFloat = 3
+        let emojiStr = NSAttributedString(string: emoji,
+                                          attributes: [.font: NSFont.systemFont(ofSize: 13)])
+        let pctStr = NSAttributedString(string: pct.map { "\($0) %" } ?? "—", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold),
+            .foregroundColor: NSColor.white,
+        ])
+        let w = emojiW + gap + pctStr.size().width + 2
+        let image = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
+            let es = emojiStr.size()
+            emojiStr.draw(at: NSPoint(x: (emojiW - es.width) / 2, y: (h - es.height) / 2))
+            let ps = pctStr.size()
+            pctStr.draw(at: NSPoint(x: emojiW + gap, y: (h - ps.height) / 2))
             return true
         }
         image.isTemplate = false
@@ -110,13 +116,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover() {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else if let button = statusItem.button {
-                Task { await self.refresh(includeAPI: false) }
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+        if panel.isVisible {
+            closePanel()
+        } else if let button = statusItem.button, let btnWindow = button.window {
+            Task { await self.refresh(includeAPI: false) }
+            panel.layoutIfNeeded()
+            // la fenêtre du status item EST l'icône, déjà en coordonnées écran
+            let btnFrame = btnWindow.frame
+            let size = panel.contentViewController?.view.fittingSize ?? panel.frame.size
+            var origin = NSPoint(x: btnFrame.midX - size.width / 2, y: btnFrame.minY - size.height - 8)
+            // ne jamais déborder de l'écran — et si la menubar est en auto-hide
+            // (app fullscreen), la status window est HORS écran (y négatif) :
+            // on ancre alors en haut de l'écran visible
+            // window hors écran → .screen nil ; app accessory → .main nil aussi
+            if let screen = btnWindow.screen ?? NSScreen.main ?? NSScreen.screens.first {
+                let vf = screen.visibleFrame
+                if btnFrame.minY < vf.minY || btnFrame.minY > screen.frame.maxY {
+                    origin.y = vf.maxY - size.height - 8
+                }
+                origin.x = min(max(origin.x, vf.minX + 8), vf.maxX - size.width - 8)
+                origin.y = min(max(origin.y, vf.minY + 8), vf.maxY - size.height - 8)
+            }
+            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+            panel.makeKeyAndOrderFront(nil)
+            mlog("panel show — frame \(panel.frame) visible \(panel.isVisible)")
+            // clic hors de la fenêtre → fermeture (comportement popover)
+            clickMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                Task { @MainActor in self?.closePanel() }
+            }
         }
+    }
+
+    private func resizePanel(to size: NSSize) {
+        guard panel.isVisible, size.width > 0, size.height > 0,
+              abs(panel.frame.height - size.height) > 0.5 else { return }
+        var f = panel.frame
+        f.origin.y = f.maxY - size.height // le bord haut ne bouge pas
+        f.size = size
+        panel.setFrame(f, display: true)
+    }
+
+    private func closePanel() {
+        panel.orderOut(nil)
+        if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
     }
 }
 

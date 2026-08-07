@@ -1,14 +1,15 @@
 import AppKit
 import SwiftUI
 
-// Identité : ink teinté teal, accent #00D4AA, police système Apple (SF).
+// Identité : noir neutre translucide, gris neutres — le teal #00D4AA n'est
+// qu'une couleur d'ACCENT (jauges, liens, verdicts), jamais une teinte de fond.
 enum Theme {
-    static let bg = Color(red: 0.047, green: 0.078, blue: 0.071)      // ink teal-tinté
+    static let bg = Color(white: 0.04)
     static let raised = Color.white.opacity(0.045)
     static let track = Color.white.opacity(0.07)
-    static let text = Color(red: 0.95, green: 0.97, blue: 0.96)
-    static let sub = Color(red: 0.56, green: 0.65, blue: 0.62)
-    static let faint = Color(red: 0.38, green: 0.46, blue: 0.43)
+    static let text = Color(white: 0.96)
+    static let sub = Color(white: 0.62)
+    static let faint = Color(white: 0.42)
     static let teal = Color(red: 0.0, green: 0.831, blue: 0.667)      // #00D4AA
     static let amber = Color(red: 1.0, green: 0.69, blue: 0.30)
     static let red = Color(red: 1.0, green: 0.42, blue: 0.38)
@@ -18,6 +19,18 @@ enum Theme {
         if p >= 90 { return red }
         if p >= 75 { return amber }
         return teal
+    }
+
+    /// Allure de conso — seuils calés sur des débits in+out (cache exclu).
+    /// Partagé entre la carte Burn rate et l'icône menubar.
+    static func paceEmoji(_ tokPerMin: Int) -> String {
+        switch tokPerMin {
+        case ..<100: return "🚶"
+        case ..<500: return "🚴"
+        case ..<1_500: return "🚗"
+        case ..<4_000: return "✈️"
+        default: return "🚀"
+        }
     }
 }
 

@@ -6,6 +6,9 @@ struct SubscriptionUsage {
     var fiveHourResetsAt: Date?
     var sevenDayPercent: Double?
     var sevenDayResetsAt: Date?
+    // Cap hebdo Fable (50 % du forfait) — % OFFICIEL publié par l'API dans
+    // limits[] (kind=weekly_scoped, scope.model.display_name="Fable").
+    var fableWeekPercent: Double?
     var subscriptionType: String?
 }
 
@@ -50,6 +53,15 @@ enum UsageAPI {
         }
         if let (p, r) = parse("five_hour") { usage.fiveHourPercent = p; usage.fiveHourResetsAt = r }
         if let (p, r) = parse("seven_day") { usage.sevenDayPercent = p; usage.sevenDayResetsAt = r }
+        if let limits = json["limits"] as? [[String: Any]] {
+            for l in limits where (l["kind"] as? String) == "weekly_scoped" {
+                guard let scope = l["scope"] as? [String: Any],
+                      let model = scope["model"] as? [String: Any],
+                      (model["display_name"] as? String)?.hasPrefix("Fable") == true,
+                      let pct = l["percent"] as? Double else { continue }
+                usage.fableWeekPercent = pct
+            }
+        }
         return usage
     }
 }

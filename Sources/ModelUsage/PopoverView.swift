@@ -1,237 +1,313 @@
 import ServiceManagement
 import SwiftUI
 
-// Un seul écran : session (forfait réel), courbe live, par-modèle, santé,
-// semaine, économie du mois. Le détail chiffré est en tooltip (.help) — l'écran
-// ne montre que ce qui se lit d'un coup d'œil.
+// Structure calquée sur Claude Code Usage Monitor : titre centré (teal),
+// cartes « Session actuelle / Token usage / Burn rate / Prédiction », puis
+// semaine (hebdo + plafond Fable) et économie. Jauges fines, chiffres bruts,
+// détails repliés. Panel borderless : fond noir translucide + radius 24.
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
+    @State private var showChart = false
+    @State private var weekMode = false // toggle carte session : bloc 5 h ↔ hebdo
+    @State private var addScheduleTick = 0
+    // Hauteur mesurée du bloc au-dessus du fold (header → Économie) : la
+    // fenêtre se cale dessus, les réglages restent invisibles sans scroll,
+    // et le mode Semaine agrandit la fenêtre tout seul.
+    @State private var foldHeight: CGFloat = 420
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            sessionHero
-            heartMonitor
-            if !store.rows.isEmpty { modelSection }
-            weeklySection
-            Divider().overlay(Color.white.opacity(0.06))
-            costSection
-            footer
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 10) {
+                foldContent
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: FoldHeightKey.self, value: g.size.height)
+                    })
+                // — sous le fold —
+                card(header: {
+                    HStack {
+                        Text("Ouvrir au login")
+                            .font(AppFont.bold(12))
+                            .foregroundStyle(Theme.text)
+                        Spacer()
+                        LaunchAtLoginToggle()
+                    }
+                }) { EmptyView() }
+                card(header: {
+                    HStack {
+                        Text("Sessions Claude programmées")
+                            .font(AppFont.bold(12))
+                            .foregroundStyle(Theme.text)
+                        Spacer()
+                        Button {
+                            withAnimation(.easeOut(duration: 0.18)) { addScheduleTick += 1 }
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundStyle(Theme.teal)
+                        }
+                        .buttonStyle(.plain)
+                        .focusEffectDisabled()
+                    }
+                }) { SchedulesList(addTick: $addScheduleTick) }
+            }
+            .padding(14)
         }
-        .padding(20)
-        .frame(width: 420, alignment: .leading)
-        .background(Theme.bg)
+        .onPreferenceChange(FoldHeightKey.self) { foldHeight = $0 }
+        // 14 de padding haut + 8 d'air : la card suivante (à +10) reste cachée
+        .frame(width: 336, height: foldHeight + 22, alignment: .leading)
+        .background {
+            ZStack {
+                VisualBlur()
+                Theme.bg.opacity(0.45)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+        )
         .preferredColorScheme(.dark)
     }
 
-    // MARK: - header
+    private var foldContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+                header
+                card(header: {
+                    // toggle segmenté : deux pills dans une pill de fond
+                    HStack(spacing: 2) {
+                        titleButton("Session actuelle", active: !weekMode) { weekMode = false }
+                        titleButton("Semaine", active: weekMode) { weekMode = true }
+                    }
+                    .padding(3)
+                    .background(Capsule().fill(Theme.track))
+                    .frame(maxWidth: .infinity)
+                }) { sessionContent }
+                card("Burn rate (dernière heure)") { burnContent }
+                card("Prédiction") {
+                    verdictLine(sessionVerdict.0, color: sessionVerdict.1, ok: sessionVerdict.2)
+                }
+                card("Économie \(monthName())") { costContent }
+        }
+    }
+
+    // MARK: - header (titre centré, teal — quit discret à droite)
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Text("ModelUsage")
-                .font(AppFont.black(19))
-                .foregroundStyle(Theme.text)
-            if store.sub?.subscriptionType != nil {
-                Text(UsageStore.subscriptionLabel)
-                    .font(AppFont.bold(11))
-                    .foregroundStyle(Theme.teal)
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(Capsule().fill(Theme.teal.opacity(0.14)))
+        VStack(spacing: 3) {
+            ZStack {
+                HStack(spacing: 7) {
+                    Text("ModelUsage")
+                        .font(AppFont.black(15))
+                        .foregroundStyle(Theme.teal)
+                    if store.sub?.subscriptionType != nil {
+                        Text(UsageStore.subscriptionLabel)
+                            .font(AppFont.bold(10))
+                            .foregroundStyle(Theme.teal)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.teal.opacity(0.14)))
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                HStack {
+                    Spacer()
+                    Button { NSApp.terminate(nil) } label: {
+                        Image(systemName: "power")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.sub)
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .help("Quitter ModelUsage")
+                }
             }
-            Spacer()
             if store.sub?.fiveHourResetsAt == nil {
                 // un seul état explicite plutôt que des « — » muets partout
                 Text("⏳ % officiels en attente")
-                    .font(.system(size: 12))
+                    .font(.system(size: 10))
                     .foregroundStyle(Theme.faint)
             }
         }
+        .padding(.horizontal, 2)
     }
 
-    // MARK: - session (usage réel vs forfait)
+    // MARK: - carte session (bloc 5 h officiel ↔ conso hebdo, jauge empilée)
 
-    private var sessionHero: some View {
-        let pct = store.livePercent ?? store.sub?.fiveHourPercent
+    /// Pill du toggle de période : sélection remplie, l'autre transparente.
+    private func titleButton(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: { withAnimation(.easeOut(duration: 0.18)) { action() } }) {
+            Text(label)
+                .font(AppFont.bold(11))
+                .foregroundStyle(active ? Theme.text : Theme.sub)
+                .padding(.horizontal, 10).padding(.vertical, 3)
+                .background(Capsule().fill(active ? Color.white.opacity(0.12) : .clear))
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+    }
+
+    private var sessionContent: some View {
+        let pct = weekMode ? store.sub?.sevenDayPercent
+                           : (store.livePercent ?? store.sub?.fiveHourPercent)
         let color = Theme.status(pct)
-        let fraction = (pct ?? 0) / 100
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("SESSION 5 H")
-                .font(AppFont.bold(11)).tracking(1.2)
-                .foregroundStyle(Theme.faint)
-            // Début · Durée · Reset — le bloc 5 h officiel (resets_at API)
-            if let reset = store.sub?.fiveHourResetsAt {
-                let started = reset.addingTimeInterval(-5 * 3600)
+        let shares = weekMode ? store.weekShares
+                              : Dictionary(store.rows.map { ($0.label, $0.share) },
+                                           uniquingKeysWith: { a, _ in a })
+        return VStack(alignment: .leading, spacing: 9) {
+            // Début · Durée · Reset (resets_at API — fenêtre 5 h ou 7 j)
+            if let reset = weekMode ? store.sub?.sevenDayResetsAt : store.sub?.fiveHourResetsAt {
+                let window: TimeInterval = weekMode ? 7 * 24 * 3600 : 5 * 3600
+                let started = reset.addingTimeInterval(-window)
                 let elapsed = max(0, Int(Date().timeIntervalSince(started)))
                 HStack {
-                    sessionFact("DÉBUT", hourFmt(started), .leading)
-                    Spacer()
-                    sessionFact("DURÉE", "\(elapsed / 3600) h \(String(format: "%02d", (elapsed % 3600) / 60))", .center)
-                    Spacer()
-                    sessionFact("RESET", hourFmt(reset), .trailing)
+                    // 7 j : juste le jour (« mer. 6 ») — l'heure alourdit
+                    sessionFact("DÉBUT", weekMode ? shortDayFmt(started) : hourFmt(started), .leading)
+                    Spacer(minLength: 14)
+                    sessionFact("DURÉE", elapsedLabel(elapsed), .center)
+                    Spacer(minLength: 14)
+                    sessionFact("RESET", weekMode ? shortDayFmt(reset) : hourFmt(reset), .trailing)
                 }
-                .padding(.vertical, 2)
             }
-            // le % vit SUR la barre : un seul endroit où lire la conso
-            ZStack(alignment: .trailing) {
-                bar(fraction: fraction, color: color, height: 22)
+            // jauge fine empilée : chaque segment = la part d'un modèle
+            HStack(spacing: 10) {
+                stackedBar(totalPct: pct ?? 0, shares: shares, height: 6)
+                    .overlay(alignment: .leading) {
+                        // mode hebdo : repère blanc = part de la fenêtre écoulée
+                        if weekMode, let e = weekElapsedFraction {
+                            GeometryReader { geo in
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.55))
+                                    .frame(width: 2)
+                                    .offset(x: geo.size.width * e)
+                            }
+                        }
+                    }
                 Text(pct.map { "\(Int($0)) %" } ?? "—")
-                    .font(AppFont.black(14))
-                    // au-delà de ~92 % le remplissage passe sous le texte
-                    .foregroundStyle(fraction > 0.92 ? Theme.bg : color)
-                    .padding(.trailing, 10)
+                    .font(AppFont.bold(12))
+                    .foregroundStyle(color)
                     .contentTransition(.numericText())
                     .animation(.easeOut(duration: 0.5), value: pct.map { Int($0) })
             }
-            .help(sessionDetail)
-            // seul reste de l'ancienne section « santé » : le verdict du bloc 5 h
-            Text(sessionVerdict.0)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(sessionVerdict.1)
+            .help(weekMode ? weeklyDetail : sessionDetail)
+            legend(shares: shares)
+            // mode hebdo : plafond Fable + verdict d'allure (ex-carte Semaine)
+            if weekMode {
+                let fablePct = store.fableWeekPercent
+                let fableColor = Theme.status(fablePct)
+                HStack {
+                    Text("Fable 5 · plafond 50 %")
+                        .font(AppFont.bold(11)).foregroundStyle(Theme.text)
+                    Spacer()
+                    Text(fablePct.map { "\(fableIsOfficial ? "" : "≈")\(Int($0)) %" } ?? "—")
+                        .font(AppFont.bold(12)).foregroundStyle(fableColor)
+                }
+                bar(fraction: (fablePct ?? 0) / 100, color: fableColor, height: 6)
+                    .help(fableDetail)
+                verdictLine(weeklyVerdict.0,
+                            color: weeklyColor(pct: store.sub?.sevenDayPercent,
+                                               elapsed: weekElapsedFraction),
+                            ok: weeklyVerdict.1)
+                if let f = fablePct, f >= 75 {
+                    verdictLine(f >= 95 ? "plafond Fable atteint — basculer sur Opus/Haiku ou crédits"
+                                        : "Fable approche de son plafond — penser à alterner",
+                                color: fableColor, ok: false)
+                }
+            }
         }
     }
 
-    private var sessionVerdict: (String, Color) {
+    private func elapsedLabel(_ s: Int) -> String {
+        let d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60
+        return d > 0 ? "\(d) j \(h) h" : "\(h) h \(String(format: "%02d", m))"
+    }
+
+    /// Une seule barre, remplie jusqu'au % total, découpée aux couleurs des
+    /// modèles au prorata de leur part du coût.
+    private func stackedBar(totalPct: Double, shares: [String: Double], height: CGFloat) -> some View {
+        let fill = min(1, totalPct / 100)
+        let segments: [(color: Color, w: Double)] = modelRows.compactMap { row in
+            let s = shares[row.label] ?? 0
+            return s > 0 ? (row.color, s * fill) : nil
+        }
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.track)
+                HStack(spacing: 0) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                        Rectangle()
+                            .fill(seg.color)
+                            .frame(width: max(0, geo.size.width * seg.w))
+                    }
+                }
+                .clipShape(Capsule())
+                .animation(.easeOut(duration: 0.5), value: totalPct)
+            }
+        }
+        .frame(height: height)
+    }
+
+    /// Mini-légende des couleurs de la jauge empilée, avec la part de chacun.
+    private func legend(shares: [String: Double]) -> some View {
+        HStack(spacing: 12) {
+            ForEach(modelRows.filter { (shares[$0.label] ?? 0) > 0.005 }) { row in
+                HStack(spacing: 3) {
+                    Circle().fill(row.color).frame(width: 5, height: 5)
+                    Text(row.label)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.faint)
+                    Text("\(Int((shares[row.label] ?? 0) * 100)) %")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Theme.sub)
+                }
+            }
+        }
+    }
+
+
+    /// (texte, couleur, ok) — ok pilote l'icône ✓ / ⚠
+    private var sessionVerdict: (String, Color, Bool) {
         guard let depletes = store.depletesAt else {
-            return (store.burnHistory.last ?? 0) < 1000
-                ? ("à l'arrêt", Theme.sub) : ("mesure en cours…", Theme.faint)
+            return store.hourIOTokens / 60 < 50
+                ? ("à l'arrêt — rien ne brûle", Theme.sub, true) : ("mesure en cours…", Theme.faint, true)
         }
         if let reset = store.sub?.fiveHourResetsAt, depletes >= reset {
-            return ("tiendra jusqu'au reset", Theme.teal)
+            return ("la session tiendra jusqu'au reset", Theme.teal, true)
         }
         let lasts = max(0, Int(depletes.timeIntervalSinceNow))
         return ("épuisée dans \(lasts / 3600) h \(String(format: "%02d", (lasts % 3600) / 60)) — avant le reset",
-                Theme.amber)
+                Theme.amber, false)
     }
 
     private var sessionDetail: String {
-        var s = "\(tokensFmt(store.sessionTokens)) tokens"
+        var s = "pondéré tous tokens : \(tokensFmt(store.sessionTokens))"
         if let limit = store.estimatedLimit { s += " / ≈\(tokensFmt(limit))" }
         if let rest = store.remainingTokens { s += " · reste ≈\(tokensFmt(rest))" }
         return s + "\néquiv. API : \(currency(store.sessionCost)) ce bloc · \(currency(store.dayCost)) aujourd'hui"
     }
 
-    // MARK: - courbe live + allure (fusionnés : une seule lecture du débit)
+    // MARK: - carte burn rate (moyenne sur la dernière heure, in+out)
 
-    private var heartMonitor: some View {
-        let live = store.burnHistory.last ?? store.burnPerMin
-        return VStack(alignment: .leading, spacing: 6) {
+    private var burnContent: some View {
+        let perMin = store.hourIOTokens / 60
+        return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                Text("TOKENS LIVE")
-                    .font(AppFont.bold(11)).tracking(1.2)
-                    .foregroundStyle(Theme.faint)
-                Spacer()
-                Text(pace(live)).font(.system(size: 16))
-                Text("\(tokensFmt(Int(live))) tok/min")
+                Text(Theme.paceEmoji(perMin)).font(.system(size: 15))
+                Text("\(grouped(perMin)) tokens/min")
                     .font(AppFont.bold(13))
                     .foregroundStyle(Theme.teal)
                     .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.4), value: live)
-            }
-            HeartRateView(values: store.burnHistory)
-                .frame(height: 52)
-                .help("moyenne 1 h : \(tokensFmt(Int(store.burnPerMin))) tok/min · \(tokensFmt(Int(store.burnPerMin * 60))) tok/h")
-        }
-    }
-
-    // MARK: - par modèle
-
-    private var modelSection: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Text("PAR MODÈLE")
-                .font(AppFont.bold(11)).tracking(1.2)
-                .foregroundStyle(Theme.faint)
-            HStack(spacing: 10) {
-                ForEach(modelPills) { modelPill($0) }
-            }
-        }
-    }
-
-    // Toujours les mêmes 3 carrés — les modèles que Claude Code pilote — même à
-    // 0 %, pour que la lecture ne bouge pas d'un bloc à l'autre. Tout autre
-    // modèle qui aurait consommé s'ajoute à la suite.
-    private static let pinnedModels = ["Opus 5", "Fable 5", "Haiku"]
-
-    private var modelPills: [ModelRow] {
-        let byLabel = Dictionary(store.rows.map { ($0.label, $0) }, uniquingKeysWith: { a, _ in a })
-        let pinned = Self.pinnedModels.map { label in
-            byLabel[label] ?? ModelRow(id: label, label: label,
-                                       color: Pricing.table.first { $0.label == label }?.color ?? .gray,
-                                       tokens: 0, inTok: 0, outTok: 0, cacheTok: 0, cost: 0, share: 0)
-        }
-        return pinned + store.rows.filter { !Self.pinnedModels.contains($0.label) }
-    }
-
-    // Pill carrée : remplissage de bas en haut = part du bloc courant.
-    private func modelPill(_ row: ModelRow) -> some View {
-        ZStack(alignment: .top) {
-            GeometryReader { geo in
-                Rectangle()
-                    .fill(row.color.opacity(0.85))
-                    .frame(height: geo.size.height * min(1, row.share))
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .animation(.easeOut(duration: 0.6), value: row.share)
-            }
-            VStack(spacing: 2) {
-                Text(row.label)
-                    .font(AppFont.bold(12))
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                Text("\(Int(row.share * 100)) %")
-                    .font(AppFont.black(20))
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.6), value: Int(row.share * 100))
-            }
-            // texte en haut : lisible sur le fond sombre comme sur le remplissage
-            .foregroundStyle(Theme.text)
-            .padding(.top, 10)
-            .padding(.horizontal, 6)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .background(Theme.track)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .help("\(currency(row.cost)) · \(tokensFmt(row.tokens)) tokens — in \(tokensFmt(row.inTok)) · out \(tokensFmt(row.outTok)) · cache \(tokensFmt(row.cacheTok))")
-    }
-
-    // MARK: - conso hebdo (jauge d'ALLURE, pas de niveau)
-
-    /**
-     * La couleur ne dit pas « combien reste-t-il » mais « suis-je en avance sur
-     * mon budget ». 60 % consommés à mi-semaine = normal (vert) ; les mêmes 60 %
-     * avec encore 4 jours avant le reset = rouge. Repère = part de la fenêtre
-     * 7 j écoulée, la barre devrait rester à sa hauteur.
-     */
-    private var weeklySection: some View {
-        let pct = store.sub?.sevenDayPercent
-        let elapsed = weekElapsedFraction
-        let color = weeklyColor(pct: pct, elapsed: elapsed)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("CONSO. HEBDO.")
-                    .font(AppFont.bold(11)).tracking(1.2)
-                    .foregroundStyle(Theme.faint)
+                    .animation(.easeOut(duration: 0.4), value: perMin)
                 Spacer()
-                Text(pct.map { "\(Int($0)) %" } ?? "—")
-                    .font(AppFont.bold(15))
-                    .foregroundStyle(color)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.5), value: pct.map { Int($0) })
             }
-            bar(fraction: (pct ?? 0) / 100, color: color, height: 14)
-                .overlay(alignment: .leading) {
-                    if let e = elapsed {
-                        GeometryReader { geo in
-                            Rectangle()
-                                .fill(Color.white.opacity(0.55))
-                                .frame(width: 2)
-                                .offset(x: geo.size.width * e)
-                        }
-                    }
-                }
-                .help(weeklyDetail)
-            Text(weeklyVerdict)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(color)
+            Text("\(grouped(store.hourIOTokens)) tokens sur la dernière heure")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(Theme.sub)
+                .contentTransition(.numericText())
+                .animation(.easeOut(duration: 0.4), value: store.hourIOTokens)
         }
+        .help("tokens réels (input + output, cache exclu)")
     }
+
+    // MARK: - hebdo (affiché dans la carte session, mode « Semaine »)
 
     /// Part de la fenêtre 7 j déjà écoulée (0…1). nil tant que l'API n'a rien dit.
     private var weekElapsedFraction: Double? {
@@ -239,6 +315,12 @@ struct PopoverView: View {
         return min(1, max(0, 1 - reset.timeIntervalSinceNow / (7 * 24 * 3600)))
     }
 
+    /**
+     * La couleur ne dit pas « combien reste-t-il » mais « suis-je en avance sur
+     * mon budget ». 60 % consommés à mi-semaine = normal (vert) ; les mêmes 60 %
+     * avec encore 4 jours avant le reset = rouge. Repère blanc = part de la
+     * fenêtre 7 j écoulée, la barre devrait rester à sa hauteur.
+     */
     private func weeklyColor(pct: Double?, elapsed: Double?) -> Color {
         guard let pct else { return Theme.sub }
         if pct >= 95 { return Theme.red }
@@ -251,18 +333,18 @@ struct PopoverView: View {
         }
     }
 
-    private var weeklyVerdict: String {
+    private var weeklyVerdict: (String, Bool) {
         guard let pct = store.sub?.sevenDayPercent, let reset = store.sub?.sevenDayResetsAt else {
-            return "en attente des % officiels"
+            return ("en attente des % officiels", true)
         }
         let left = remainingLabel(until: reset)
-        if pct >= 95 { return "plafond hebdo atteint — reset dans \(left)" }
-        guard let elapsed = weekElapsedFraction, elapsed > 0.03 else { return "reset dans \(left)" }
-        if pct / 100 / elapsed < 1.05 { return "dans le budget — reste \(left) avant reset" }
+        if pct >= 95 { return ("plafond hebdo atteint — reset dans \(left)", false) }
+        guard let elapsed = weekElapsedFraction, elapsed > 0.03 else { return ("reset dans \(left)", true) }
+        if pct / 100 / elapsed < 1.05 { return ("dans le budget — reste \(left) avant reset", true) }
         if let cap = store.weekDepletesAt, cap < reset {
-            return "trop vite : plafond \(weekDayFmt(cap)), reset dans \(left)"
+            return ("trop vite : plafond \(weekDayFmt(cap)), reset dans \(left)", false)
         }
-        return "\(Int(pct)) % brûlés en \(Int(elapsed * 100)) % de la semaine — reste \(left)"
+        return ("\(Int(pct)) % brûlés en \(Int(elapsed * 100)) % de la semaine — reste \(left)", false)
     }
 
     private var weeklyDetail: String {
@@ -273,37 +355,63 @@ struct PopoverView: View {
         return s
     }
 
+    private var fableIsOfficial: Bool { store.sub?.fableWeekPercent != nil }
+
+    private var fableDetail: String {
+        var s = "Fable 5 est limité à 50 % de la limite hebdo du forfait (pool partagé, pas une rallonge)."
+        s += String(format: "\nFable = %.0f %% du coût 7 j local", store.fableWeekShare * 100)
+        if let pct = store.sub?.sevenDayPercent {
+            s += String(format: " · hebdo tous modèles %.0f %%", pct)
+        }
+        s += fableIsOfficial ? "\n% officiel (API, limite dédiée Fable)"
+                             : "\nestimation coût-pondérée (API pas encore répondu)"
+        return s
+    }
+
     private func remainingLabel(until d: Date) -> String {
         let s = max(0, Int(d.timeIntervalSinceNow))
         let days = s / 86400, hours = (s % 86400) / 3600
         return days > 0 ? "\(days) j \(hours) h" : "\(hours) h"
     }
 
-    // MARK: - économie du mois (ex-Journal, condensé)
+    // MARK: - par modèle (déplié depuis la carte token usage)
 
-    private var costSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("ÉCONOMIE \(monthName().uppercased())")
-                    .font(AppFont.bold(11)).tracking(1.2)
-                    .foregroundStyle(Theme.faint)
-                Spacer()
-                if store.journalReady {
+    // Toujours les mêmes 3 lignes — les modèles que Claude Code pilote — même à
+    // 0 %, pour que la lecture ne bouge pas d'un bloc à l'autre. Tout autre
+    // modèle qui aurait consommé s'ajoute à la suite.
+    private static let pinnedModels = ["Opus 5", "Fable 5", "Haiku"]
+
+    private var modelRows: [ModelRow] {
+        let byLabel = Dictionary(store.rows.map { ($0.label, $0) }, uniquingKeysWith: { a, _ in a })
+        let pinned = Self.pinnedModels.map { label in
+            byLabel[label] ?? ModelRow(id: label, label: label,
+                                       color: Pricing.table.first { $0.label == label }?.color ?? .gray,
+                                       tokens: 0, inTok: 0, outTok: 0, cacheTok: 0, cost: 0, share: 0)
+        }
+        return pinned + store.rows.filter { !Self.pinnedModels.contains($0.label) }
+    }
+
+    // MARK: - carte économie du mois
+
+    private var costContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if store.journalReady {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text(currency(store.monthCost))
-                        .font(AppFont.black(22))
+                        .font(AppFont.black(17))
                         .foregroundStyle(Theme.teal)
                     Text("×\(String(format: "%.1f", store.monthCost / UsageStore.subscriptionMonthly)) l'abonnement")
-                        .font(AppFont.bold(12))
+                        .font(AppFont.bold(11))
                         .foregroundStyle(Theme.text)
+                    Spacer()
                 }
-            }
-            if store.journalReady {
-                dailyChart.help(costDetail)
+                .help(costDetail)
+                disclosure("Détail 14 jours", isOn: $showChart) { dailyChart }
             } else {
-                HStack(spacing: 8) {
+                HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
                     Text("Analyse des transcripts…")
-                        .font(.system(size: 12)).foregroundStyle(Theme.sub)
+                        .font(.system(size: 11)).foregroundStyle(Theme.sub)
                 }
             }
         }
@@ -326,63 +434,93 @@ struct PopoverView: View {
     private var dailyChart: some View {
         let days = Array(store.days.suffix(14))
         let maxCost = max(days.map(\.cost).max() ?? 1, 1)
-        return HStack(alignment: .bottom, spacing: 5) {
+        return HStack(alignment: .bottom, spacing: 4) {
             ForEach(days) { d in
                 let today = Calendar.current.isDateInToday(d.day)
                 let dayNum = Calendar.current.component(.day, from: d.day)
-                VStack(spacing: 3) {
-                    RoundedRectangle(cornerRadius: 3)
+                VStack(spacing: 2) {
+                    RoundedRectangle(cornerRadius: 2.5)
                         .fill(Theme.teal.opacity(today ? 0.95 : 0.45))
-                        .frame(height: max(4, 62 * d.cost / maxCost))
+                        .frame(height: max(3, 40 * d.cost / maxCost))
                     // étiqueter clairsemé : lisible, pas un mur de chiffres
                     Text(today || dayNum == 1 || dayNum % 5 == 0 ? "\(dayNum)" : " ")
-                        .font(.system(size: 9, weight: today ? .bold : .regular))
+                        .font(.system(size: 8, weight: today ? .bold : .regular))
                         .foregroundStyle(today ? Theme.teal : Theme.faint)
                 }
                 .frame(maxWidth: .infinity)
             }
         }
-        .frame(height: 80, alignment: .bottom)
+        .frame(height: 54, alignment: .bottom)
+        .help(costDetail)
     }
 
-    // Allure de conso live : du piéton à la fusée (seuils calés sur les débits
-    // réels observés, cache reads compris).
-    private func pace(_ tokPerMin: Double) -> String {
-        switch tokPerMin {
-        case ..<10_000: return "🚶"
-        case ..<150_000: return "🚴"
-        case ..<600_000: return "🚗"
-        case ..<1_500_000: return "✈️"
-        default: return "🚀"
+    // MARK: - briques UI
+
+    /// Carte titrée (titre blanc bold, façon Claude Code Usage Monitor).
+    private func card(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        card(header: {
+            Text(title)
+                .font(AppFont.bold(12))
+                .foregroundStyle(Theme.text)
+        }, content: content)
+    }
+
+    /// Variante avec entête libre (ex : titres-toggle de la carte session).
+    private func card(@ViewBuilder header: () -> some View,
+                      @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header()
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.raised))
+    }
+
+    /// Ligne de statut : ✓ teal quand tout va bien, ⚠ sinon.
+    private func verdictLine(_ text: String, color: Color, ok: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+            Text(text)
+                .font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(color)
+    }
+
+    /// Repli minimal (chevron + label teal), façon « Model Breakdown ».
+    private func disclosure(_ label: String, isOn: Binding<Bool>,
+                            @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) { isOn.wrappedValue.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(isOn.wrappedValue ? 90 : 0))
+                    Text(label).font(AppFont.bold(11))
+                }
+                .foregroundStyle(Theme.teal)
+            }
+            .buttonStyle(.plain)
+            .focusEffectDisabled()
+            if isOn.wrappedValue { content() }
         }
     }
 
     private func sessionFact(_ label: String, _ value: String, _ align: HorizontalAlignment) -> some View {
         VStack(alignment: align, spacing: 2) {
             Text(label)
-                .font(AppFont.bold(10)).tracking(1.0)
+                .font(AppFont.bold(9)).tracking(1.0)
                 .foregroundStyle(Theme.faint)
             Text(value)
-                .font(.system(size: 15, weight: .bold, design: .monospaced))
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
                 .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
     }
-
-    // MARK: - footer
-
-    private var footer: some View {
-        HStack(spacing: 12) {
-            Spacer()
-            LaunchAtLoginToggle()
-            Button("Quitter") { NSApp.terminate(nil) }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.sub)
-        }
-    }
-
-    // MARK: - helpers
 
     private func bar(fraction: Double, color: Color, height: CGFloat) -> some View {
         GeometryReader { geo in
@@ -412,7 +550,18 @@ struct PopoverView: View {
     }
 
     // Formatters mis en cache : le body est recalculé à chaque tick (1 Hz),
-    // instancier un DateFormatter à chaque passage coûte plus que tout le reste.
+    // instancier un DateFormatter/NumberFormatter à chaque passage coûte plus
+    // que tout le reste.
+    private static let groupedF: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.groupingSeparator = " "
+        return f
+    }()
+    private func grouped(_ n: Int) -> String {
+        Self.groupedF.string(from: NSNumber(value: n)) ?? "\(n)"
+    }
+
     private static func fmt(_ pattern: String) -> DateFormatter {
         let f = DateFormatter()
         f.locale = Locale(identifier: "fr_FR")
@@ -420,79 +569,46 @@ struct PopoverView: View {
         return f
     }
     private static let hourF = fmt("HH:mm")
-    private static let dayF = fmt("EEE HH:mm")
+    private static let dayF = fmt("EEE d · HH'h'")
+    private static let shortDayF = fmt("EEE d")
     private static let weekDayF = fmt("EEEE HH'h'")
     private static let monthF = fmt("MMMM yyyy")
 
     private func hourFmt(_ d: Date) -> String { Self.hourF.string(from: d) }
     private func dayFmt(_ d: Date) -> String { Self.dayF.string(from: d) }
+    private func shortDayFmt(_ d: Date) -> String { Self.shortDayF.string(from: d) }
     private func weekDayFmt(_ d: Date) -> String { Self.weekDayF.string(from: d) }
     private func monthName() -> String { Self.monthF.string(from: Date()) }
 }
 
-// Tracé façon moniteur cardiaque : ligne teal avec léger glow, grille faible,
-// point pulsant au bout. Un point par seconde, fenêtre ~2 min.
-struct HeartRateView: View {
-    let values: [Double]
-    @State private var pulse = false
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, h = geo.size.height
-            let slots = UsageStore.burnPoints
-            let maxV = max(values.max() ?? 1, 1)
-            let points: [CGPoint] = values.enumerated().map { i, v in
-                CGPoint(x: w * CGFloat(slots - values.count + i) / CGFloat(slots - 1),
-                        y: h - 4 - (h - 12) * CGFloat(v / maxV))
-            }
-            ZStack(alignment: .leading) {
-                ForEach(1..<3) { i in
-                    Path { p in
-                        p.move(to: CGPoint(x: 0, y: h * CGFloat(i) / 3))
-                        p.addLine(to: CGPoint(x: w, y: h * CGFloat(i) / 3))
-                    }
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
-                }
-                if points.count > 1 {
-                    Path { p in
-                        p.move(to: points[0])
-                        for pt in points.dropFirst() { p.addLine(to: pt) }
-                    }
-                    .stroke(Theme.teal, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    .shadow(color: Theme.teal.opacity(0.6), radius: 3)
-                }
-                if let last = points.last {
-                    Circle()
-                        .fill(Theme.teal)
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(pulse ? 1.8 : 1)
-                        .opacity(pulse ? 0.3 : 1)
-                        .position(last)
-                        .animation(.easeOut(duration: 1).repeatForever(autoreverses: false), value: pulse)
-                }
-                if points.count < 2 {
-                    Text("mesure en cours…")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.faint)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-        }
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.raised))
-        .onAppear { pulse = true }
+// Hauteur du bloc au-dessus du fold (mesurée par GeometryReader).
+struct FoldHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
-// Ouvrir au login (mécanisme système)
+// Flou système derrière la fenêtre (le panel est transparent).
+struct VisualBlur: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = .hudWindow
+        v.blendingMode = .behindWindow
+        v.state = .active
+        return v
+    }
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
+// Ouvrir au login (mécanisme système) — le libellé est le titre de la carte
 struct LaunchAtLoginToggle: View {
     @State private var enabled = SMAppService.mainApp.status == .enabled
 
     var body: some View {
-        Toggle(isOn: $enabled) {
-            Text("Login")
-                .font(.system(size: 12)).foregroundStyle(Theme.sub)
-        }
-        .toggleStyle(.switch).controlSize(.mini)
+        Toggle("", isOn: $enabled)
+        .labelsHidden()
+        .toggleStyle(.switch).controlSize(.small)
         .onChange(of: enabled) {
             do {
                 if enabled { try SMAppService.mainApp.register() }

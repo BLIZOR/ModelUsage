@@ -28,6 +28,10 @@ final class UsageStore: ObservableObject {
     @Published var sub: SubscriptionUsage?
     @Published var rows: [ModelRow] = []
     @Published var sessionTokens = 0
+    // Tokens « réels » in+out (SANS cache reads) — c'est l'échelle lisible,
+    // comparable au compteur de Claude Code Usage Monitor (~ /1M sur Max 20×).
+    @Published var sessionIOTokens = 0     // bloc 5 h courant
+    @Published var hourIOTokens = 0        // dernière heure écoulée
     @Published var sessionCost = 0.0
     @Published var dayCost = 0.0
     @Published var burnPerMin = 0.0        // tokens/min sur la dernière heure
@@ -49,6 +53,14 @@ final class UsageStore: ObservableObject {
     @Published var monthTopModels: [(String, Double)] = []
     // Projection hebdo : à ce rythme, quand le plafond 7 j sera atteint.
     @Published var weekDepletesAt: Date?
+    // Fable 5 est plafonné à 50 % du forfait hebdo (pool partagé, pas une
+    // rallonge — support.claude.com art. 15424964). L'API ne donne pas de %
+    // dédié : on l'estime. Coût Fable 7 j / (50 % du plafond hebdo estimé),
+    // où plafond ≈ coût local 7 j ÷ (% hebdo officiel / 100). Se simplifie en :
+    // 2 × (part Fable du coût 7 j) × % hebdo officiel.
+    @Published var fableWeekPercent: Double?
+    @Published var fableWeekShare = 0.0    // part de Fable dans le coût 7 j
+    @Published var weekShares: [String: Double] = [:] // part du coût 7 j par modèle
     private var weekSamples: [(Date, Double)] = []
 
     private nonisolated(unsafe) let scanner = TranscriptScanner()
@@ -247,16 +259,34 @@ final class UsageStore: ObservableObject {
         struct Agg { var tokens = 0; var inTok = 0; var outTok = 0; var cacheTok = 0; var cost = 0.0 }
         var byModel: [String: Agg] = [:]
         var sessTokens = 0, hourTokens = 0
+        var sessIO = 0, hourIO = 0
         var sessCost = 0.0, dCost = 0.0
+        var weekCost = 0.0, fableCost = 0.0
+        var weekCostByLabel: [String: Double] = [:]
         let dayStart = Calendar.current.startOfDay(for: now)
         let hourAgo = now.addingTimeInterval(-3600)
+        let weekStart = sub?.sevenDayResetsAt.map { $0.addingTimeInterval(-7 * 24 * 3600) }
+            ?? now.addingTimeInterval(-7 * 24 * 3600)
 
         for e in scanner.entries {
             if e.date >= dayStart { dCost += e.cost }
-            if e.date >= hourAgo { hourTokens += e.totalTokens }
+            if e.date >= hourAgo {
+                hourTokens += e.totalTokens
+                hourIO += e.input + e.output
+            }
+            if e.date >= weekStart {
+                weekCost += e.cost
+                if let info = Pricing.info(for: e.model) {
+                    weekCostByLabel[info.label, default: 0] += e.cost
+                }
+                if e.model.hasPrefix("claude-fable") || e.model.hasPrefix("claude-mythos") {
+                    fableCost += e.cost
+                }
+            }
             guard e.date >= blockStart else { continue }
             guard let info = Pricing.info(for: e.model) else { continue }
             sessTokens += e.totalTokens
+            sessIO += e.input + e.output
             sessCost += e.cost
             var agg = byModel[info.label] ?? Agg()
             agg.tokens += e.totalTokens
@@ -268,6 +298,8 @@ final class UsageStore: ObservableObject {
         }
 
         sessionTokens = sessTokens
+        sessionIOTokens = sessIO
+        hourIOTokens = hourIO
         sessionCost = sessCost
         dayCost = dCost
         burnPerMin = Double(hourTokens) / 60.0
@@ -281,6 +313,13 @@ final class UsageStore: ObservableObject {
                      cost: agg.cost, share: sessCost > 0 ? agg.cost / sessCost : 0)
         }
         .sorted { $0.cost > $1.cost }
+
+        fableWeekShare = weekCost > 0 ? fableCost / weekCost : 0
+        weekShares = weekCost > 0 ? weekCostByLabel.mapValues { $0 / weekCost } : [:]
+        // % officiel API (limits[] weekly_scoped Fable) ; sinon estimation
+        // coût-pondérée recalée sur le % hebdo officiel.
+        fableWeekPercent = sub?.fableWeekPercent
+            ?? sub?.sevenDayPercent.map { min(100, 2 * fableWeekShare * $0) }
 
         depletesAt = projectDepletion(now: now, sessionTokens: sessTokens)
     }

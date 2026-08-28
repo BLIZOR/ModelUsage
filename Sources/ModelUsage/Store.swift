@@ -53,12 +53,13 @@ final class UsageStore: ObservableObject {
     @Published var monthTopModels: [(String, Double)] = []
     // Projection hebdo : à ce rythme, quand le plafond 7 j sera atteint.
     @Published var weekDepletesAt: Date?
-    // Fable 5 est plafonné à 50 % du forfait hebdo (pool partagé, pas une
-    // rallonge — support.claude.com art. 15424964). L'API ne donne pas de %
-    // dédié : on l'estime. Coût Fable 7 j / (50 % du plafond hebdo estimé),
-    // où plafond ≈ coût local 7 j ÷ (% hebdo officiel / 100). Se simplifie en :
-    // 2 × (part Fable du coût 7 j) × % hebdo officiel.
-    @Published var fableWeekPercent: Double?
+    // Conso hebdo par modèle. Deux natures dans la même liste (cf. ModelCap) :
+    // - officiel : plafond dédié publié par l'API (Fable = 50 % du forfait,
+    //   pool partagé et pas une rallonge — support.claude.com art. 15424964) ;
+    // - estimé : les modèles SANS plafond dédié (Opus, Sonnet…), dont la conso
+    //   s'exprime en part du forfait hebdo tous modèles = part du coût 7 j local
+    //   × % hebdo officiel.
+    @Published var weekCaps: [ModelCap] = []
     @Published var fableWeekShare = 0.0    // part de Fable dans le coût 7 j
     @Published var weekShares: [String: Double] = [:] // part du coût 7 j par modèle
     private var weekSamples: [(Date, Double)] = []
@@ -316,10 +317,20 @@ final class UsageStore: ObservableObject {
 
         fableWeekShare = weekCost > 0 ? fableCost / weekCost : 0
         weekShares = weekCost > 0 ? weekCostByLabel.mapValues { $0 / weekCost } : [:]
-        // % officiel API (limits[] weekly_scoped Fable) ; sinon estimation
-        // coût-pondérée recalée sur le % hebdo officiel.
-        fableWeekPercent = sub?.fableWeekPercent
-            ?? sub?.sevenDayPercent.map { min(100, 2 * fableWeekShare * $0) }
+        var caps = sub?.weekCaps ?? []   // plafonds dédiés officiels (Fable)
+        if let week = sub?.sevenDayPercent {
+            // API muette sur le plafond Fable : l'estimer (2 × part × % hebdo).
+            if caps.isEmpty, fableWeekShare > 0 {
+                caps.append(ModelCap(name: "Fable", percent: min(100, 2 * fableWeekShare * week),
+                                     official: false))
+            }
+            // Modèles sans plafond dédié : leur conso = part du forfait hebdo.
+            for (label, share) in weekShares where share > 0.005
+                && !caps.contains(where: { label.hasPrefix($0.name) || $0.name.hasPrefix(label) }) {
+                caps.append(ModelCap(name: label, percent: min(100, share * week), official: false))
+            }
+        }
+        weekCaps = caps.sorted { $0.percent > $1.percent }
 
         depletesAt = projectDepletion(now: now, sessionTokens: sessTokens)
     }

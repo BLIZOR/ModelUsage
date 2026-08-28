@@ -189,30 +189,64 @@ struct PopoverView: View {
             }
             .help(weekMode ? weeklyDetail : sessionDetail)
             legend(shares: shares)
-            // mode hebdo : plafond Fable + verdict d'allure (ex-carte Semaine)
+            // Conso hebdo par modèle. En mode session on ne garde que les
+            // plafonds DÉDIÉS (Fable) : un quota à sec décide de ce qu'on peut
+            // lancer TOUT DE SUITE, il ne doit pas se cacher derrière l'onglet
+            // Semaine. En mode Semaine, tous les modèles.
+            let caps = weekMode ? store.weekCaps : store.weekCaps.filter { isDedicated($0) }
+            if !caps.isEmpty {
+                Divider().overlay(Color.white.opacity(0.08)).padding(.vertical, 1)
+                Text(weekMode ? "CONSO HEBDO PAR MODÈLE" : "PLAFOND HEBDO DÉDIÉ")
+                    .font(AppFont.bold(9)).tracking(1.0)
+                    .foregroundStyle(Theme.faint)
+                // pas de ligne d'alerte : un 100 % rouge sur barre pleine se lit
+                // tout seul, la phrase ne fait que répéter la jauge
+                ForEach(caps) { cap in capRow(cap) }
+            }
+            // verdict d'allure hebdo (ex-carte Semaine)
             if weekMode {
-                let fablePct = store.fableWeekPercent
-                let fableColor = Theme.status(fablePct)
-                HStack {
-                    Text("Fable 5 · plafond 50 %")
-                        .font(AppFont.bold(11)).foregroundStyle(Theme.text)
-                    Spacer()
-                    Text(fablePct.map { "\(fableIsOfficial ? "" : "≈")\(Int($0)) %" } ?? "—")
-                        .font(AppFont.bold(12)).foregroundStyle(fableColor)
-                }
-                bar(fraction: (fablePct ?? 0) / 100, color: fableColor, height: 6)
-                    .help(fableDetail)
                 verdictLine(weeklyVerdict.0,
                             color: weeklyColor(pct: store.sub?.sevenDayPercent,
                                                elapsed: weekElapsedFraction),
                             ok: weeklyVerdict.1)
-                if let f = fablePct, f >= 75 {
-                    verdictLine(f >= 95 ? "plafond Fable atteint — basculer sur Opus/Haiku ou crédits"
-                                        : "Fable approche de son plafond — penser à alterner",
-                                color: fableColor, ok: false)
-                }
             }
         }
+    }
+
+    /// Seul Fable a un plafond hebdo DÉDIÉ (50 % du forfait). Les autres modèles
+    /// n'ont pas de quota propre : on affiche leur part du forfait hebdo.
+    private func isDedicated(_ cap: ModelCap) -> Bool { cap.name.hasPrefix("Fable") }
+
+    /// Une ligne « modèle · quota » + sa jauge. Un plafond dédié se colore à
+    /// l'état (teal / ambre / rouge) — c'est un compte à rebours. Une simple
+    /// part du forfait garde la couleur du modèle : 40 % d'Opus n'est pas une
+    /// alerte, juste une répartition.
+    private func capRow(_ cap: ModelCap) -> some View {
+        let dedicated = isDedicated(cap)
+        let color = dedicated ? Theme.status(cap.percent) : capColor(cap.name)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Circle().fill(capColor(cap.name)).frame(width: 5, height: 5)
+                Text(capLabel(cap))
+                    .font(AppFont.bold(11)).foregroundStyle(Theme.text)
+                Spacer()
+                Text("\(cap.official ? "" : "≈")\(Int(cap.percent)) %")
+                    .font(AppFont.bold(12)).foregroundStyle(color)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.5), value: Int(cap.percent))
+            }
+            bar(fraction: cap.percent / 100, color: color, height: 6)
+        }
+        .help(capDetail(cap))
+    }
+
+    /// « Fable » (display_name API) ou « Opus 5 » (label Pricing) → sa couleur.
+    private func capColor(_ name: String) -> Color {
+        Pricing.table.first { $0.label.hasPrefix(name) || name.hasPrefix($0.label) }?.color ?? Theme.teal
+    }
+
+    private func capLabel(_ cap: ModelCap) -> String {
+        isDedicated(cap) ? "\(cap.name) · plafond 50 %" : "\(cap.name) · part du hebdo"
     }
 
     private func elapsedLabel(_ s: Int) -> String {
@@ -288,23 +322,66 @@ struct PopoverView: View {
 
     private var burnContent: some View {
         let perMin = store.hourIOTokens / 60
+        // débit instantané = dernier point de la fenêtre glissante 30 s (1 Hz)
+        let live = Int(store.burnHistory.last ?? 0)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
                 Text(Theme.paceEmoji(perMin)).font(.system(size: 15))
-                Text("\(grouped(perMin)) tokens/min")
+                Text("\(grouped(live)) tokens/min")
                     .font(AppFont.bold(13))
                     .foregroundStyle(Theme.teal)
                     .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.4), value: perMin)
+                    .animation(.easeOut(duration: 0.4), value: live)
                 Spacer()
             }
-            Text("\(grouped(store.hourIOTokens)) tokens sur la dernière heure")
+            burnSparkline
+                .frame(height: 34)
+                .padding(.vertical, 2)
+            Text("moyenne 1 h : \(grouped(perMin)) tokens/min · \(grouped(store.hourIOTokens)) tokens")
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(Theme.sub)
                 .contentTransition(.numericText())
                 .animation(.easeOut(duration: 0.4), value: store.hourIOTokens)
         }
-        .help("tokens réels (input + output, cache exclu)")
+        .help("tokens réels (input + output, cache exclu) — courbe : 2 dernières minutes, 1 point/s")
+    }
+
+    /// Courbe live du débit (fenêtre 2 min, 1 Hz). Échelle Y auto sur le max
+    /// visible ; la courbe se remplit de droite à gauche tant que l'historique
+    /// n'a pas ses 120 points.
+    private var burnSparkline: some View {
+        let pts = store.burnHistory
+        return GeometryReader { geo in
+            let maxY = max(pts.max() ?? 1, 1)
+            let n = UsageStore.burnPoints
+            let step = geo.size.width / CGFloat(max(n - 1, 1))
+            // aligné à droite : le présent est au bord droit, le passé glisse à gauche
+            let x0 = geo.size.width - CGFloat(max(pts.count - 1, 0)) * step
+            let y = { (v: Double) in geo.size.height * (1 - CGFloat(v / maxY) * 0.92) }
+            let line = Path { p in
+                for (i, v) in pts.enumerated() {
+                    let pt = CGPoint(x: x0 + CGFloat(i) * step, y: y(v))
+                    i == 0 ? p.move(to: pt) : p.addLine(to: pt)
+                }
+            }
+            let fill = Path { p in
+                p.addPath(line)
+                p.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height))
+                p.addLine(to: CGPoint(x: x0, y: geo.size.height))
+                p.closeSubpath()
+            }
+            ZStack {
+                if pts.count > 1 {
+                    fill.fill(Theme.teal.opacity(0.14))
+                    line.stroke(Theme.teal, style: StrokeStyle(lineWidth: 1.5,
+                                                               lineCap: .round, lineJoin: .round))
+                } else {
+                    Text("mesure en cours…")
+                        .font(.system(size: 10)).foregroundStyle(Theme.faint)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
     }
 
     // MARK: - hebdo (affiché dans la carte session, mode « Semaine »)
@@ -355,16 +432,19 @@ struct PopoverView: View {
         return s
     }
 
-    private var fableIsOfficial: Bool { store.sub?.fableWeekPercent != nil }
-
-    private var fableDetail: String {
-        var s = "Fable 5 est limité à 50 % de la limite hebdo du forfait (pool partagé, pas une rallonge)."
-        s += String(format: "\nFable = %.0f %% du coût 7 j local", store.fableWeekShare * 100)
-        if let pct = store.sub?.sevenDayPercent {
-            s += String(format: " · hebdo tous modèles %.0f %%", pct)
+    private func capDetail(_ cap: ModelCap) -> String {
+        var s = isDedicated(cap)
+            ? "Fable est limité à 50 % de la limite hebdo du forfait (pool partagé, pas une rallonge)."
+            : "\(cap.name) n'a pas de plafond dédié : ce % est sa part du forfait hebdo déjà brûlée."
+        if isDedicated(cap) {
+            s += String(format: "\nFable = %.0f %% du coût 7 j local", store.fableWeekShare * 100)
         }
-        s += fableIsOfficial ? "\n% officiel (API, limite dédiée Fable)"
-                             : "\nestimation coût-pondérée (API pas encore répondu)"
+        if let pct = store.sub?.sevenDayPercent {
+            s += String(format: "\nhebdo tous modèles %.0f %%", pct)
+        }
+        if let reset = store.sub?.sevenDayResetsAt { s += " · reset \(dayFmt(reset))" }
+        s += cap.official ? "\n% officiel (API, limite dédiée \(cap.name))"
+                          : "\nestimation coût-pondérée sur les transcripts locaux"
         return s
     }
 

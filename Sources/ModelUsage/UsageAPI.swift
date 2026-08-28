@@ -1,14 +1,29 @@
 import Foundation
 
+/**
+ * Conso hebdo d'un modèle.
+ * - official = plafond DÉDIÉ publié par l'API (limits[] weekly_scoped, ex. Fable
+ *   à 50 % du forfait) : percent = remplissage de ce plafond.
+ * - sinon = pas de plafond dédié (Opus, Sonnet…) : percent = part estimée du
+ *   forfait hebdo tous modèles déjà brûlée par ce modèle.
+ */
+struct ModelCap: Identifiable {
+    let name: String       // display_name API (« Fable ») ou label Pricing (« Opus 5 »)
+    let percent: Double
+    var official = true
+    var id: String { name }
+}
+
 // Limites réelles de l'abonnement via l'endpoint OAuth de Claude Code.
 struct SubscriptionUsage {
     var fiveHourPercent: Double?
     var fiveHourResetsAt: Date?
     var sevenDayPercent: Double?
     var sevenDayResetsAt: Date?
-    // Cap hebdo Fable (50 % du forfait) — % OFFICIEL publié par l'API dans
-    // limits[] (kind=weekly_scoped, scope.model.display_name="Fable").
-    var fableWeekPercent: Double?
+    // Plafonds hebdo par modèle — % OFFICIELS publiés par l'API dans limits[]
+    // (kind=weekly_scoped, scope.model.display_name). Fable est plafonné à 50 %
+    // du forfait ; Opus a son propre plafond hebdo sur les plans Max.
+    var weekCaps: [ModelCap] = []
     var subscriptionType: String?
 }
 
@@ -57,11 +72,23 @@ enum UsageAPI {
             for l in limits where (l["kind"] as? String) == "weekly_scoped" {
                 guard let scope = l["scope"] as? [String: Any],
                       let model = scope["model"] as? [String: Any],
-                      (model["display_name"] as? String)?.hasPrefix("Fable") == true,
-                      let pct = l["percent"] as? Double else { continue }
-                usage.fableWeekPercent = pct
+                      let name = model["display_name"] as? String,
+                      // le champ a changé de nom selon les versions de l'endpoint
+                      let pct = (l["percent"] ?? l["utilization"]) as? Double else { continue }
+                usage.weekCaps.append(ModelCap(name: name, percent: pct))
             }
         }
+        // Blocs dédiés que l'endpoint publie à part quand le plan en a un
+        // (null sur Max 20× aujourd'hui : seul Fable a un plafond scopé).
+        for (key, name) in [("seven_day_opus", "Opus"), ("seven_day_sonnet", "Sonnet")] {
+            guard let (p, _) = parse(key),
+                  !usage.weekCaps.contains(where: { $0.name.hasPrefix(name) }) else { continue }
+            usage.weekCaps.append(ModelCap(name: name, percent: p))
+        }
+        // le plus entamé d'abord : un quota à sec doit sauter aux yeux
+        usage.weekCaps.sort { $0.percent > $1.percent }
+        mlog("caps: " + usage.weekCaps.map { "\($0.name) \(Int($0.percent))%" }
+                                      .joined(separator: " · "))
         return usage
     }
 }
